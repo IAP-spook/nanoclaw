@@ -16,6 +16,7 @@ import { request as httpRequest, RequestOptions } from 'http';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import type Database from 'better-sqlite3';
 
+import { switchToFastestNode } from './clash-switcher.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 import { createMemoryHandler } from './memory-api.js';
@@ -108,34 +109,101 @@ export function startCredentialProxy(
           }
         }
 
-        const upstream = makeRequest(
-          {
-            hostname: upstreamUrl.hostname,
-            port: upstreamUrl.port || (isHttps ? 443 : 80),
-            path: req.url,
-            method: req.method,
-            headers,
-            ...(proxyAgent ? { agent: proxyAgent } : {}),
-          } as RequestOptions,
-          (upRes) => {
-            res.writeHead(upRes.statusCode!, upRes.headers);
+        const requestOpts: RequestOptions = {
+          hostname: upstreamUrl.hostname,
+          port: upstreamUrl.port || (isHttps ? 443 : 80),
+          path: req.url,
+          method: req.method,
+          headers,
+          ...(proxyAgent ? { agent: proxyAgent } : {}),
+        };
+
+        const RETRIABLE_STATUSES = new Set([502, 503, 504]);
+
+        function sendUpstreamRequest(isRetry: boolean): void {
+          const upstream = makeRequest(requestOpts, (upRes) => {
+            const status = upRes.statusCode!;
+
+            if (!isRetry && RETRIABLE_STATUSES.has(status)) {
+              // Delay writeHead — consume error body, then try failover
+              upRes.resume();
+              upRes.on('end', () => {
+                logger.warn(
+                  { status, url: req.url },
+                  'Upstream returned retriable status, attempting node switch',
+                );
+                switchToFastestNode()
+                  .then((newNode) => {
+                    if (newNode) {
+                      logger.info(
+                        { newNode },
+                        'Node switched, retrying request',
+                      );
+                      sendUpstreamRequest(true);
+                    } else {
+                      if (!res.headersSent) {
+                        res.writeHead(status);
+                        res.end();
+                      }
+                    }
+                  })
+                  .catch(() => {
+                    if (!res.headersSent) {
+                      res.writeHead(status);
+                      res.end();
+                    }
+                  });
+              });
+              return;
+            }
+
+            // Normal path: pipe through
+            res.writeHead(status, upRes.headers);
             upRes.pipe(res);
-          },
-        );
+          });
 
-        upstream.on('error', (err) => {
-          logger.error(
-            { err, url: req.url },
-            'Credential proxy upstream error',
-          );
-          if (!res.headersSent) {
-            res.writeHead(502);
-            res.end('Bad Gateway');
-          }
-        });
+          upstream.on('error', (err) => {
+            if (!isRetry) {
+              logger.warn(
+                { err, url: req.url },
+                'Upstream connection failed, attempting node switch',
+              );
+              switchToFastestNode()
+                .then((newNode) => {
+                  if (newNode) {
+                    logger.info({ newNode }, 'Node switched, retrying request');
+                    sendUpstreamRequest(true);
+                  } else {
+                    if (!res.headersSent) {
+                      res.writeHead(502);
+                      res.end('Bad Gateway');
+                    }
+                  }
+                })
+                .catch(() => {
+                  if (!res.headersSent) {
+                    res.writeHead(502);
+                    res.end('Bad Gateway');
+                  }
+                });
+              return;
+            }
 
-        upstream.write(body);
-        upstream.end();
+            logger.error(
+              { err, url: req.url },
+              'Credential proxy upstream error (after retry)',
+            );
+            if (!res.headersSent) {
+              res.writeHead(502);
+              res.end('Bad Gateway');
+            }
+          });
+
+          upstream.write(body);
+          upstream.end();
+        }
+
+        sendUpstreamRequest(false);
       });
     });
 

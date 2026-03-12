@@ -12,6 +12,12 @@ vi.mock('./logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), debug: vi.fn(), warn: vi.fn() },
 }));
 
+// Mock clash-switcher — default: no switch available (null).
+// Tests that need a successful switch override with mockResolvedValueOnce.
+vi.mock('./clash-switcher.js', () => ({
+  switchToFastestNode: vi.fn().mockResolvedValue(null),
+}));
+
 import { startCredentialProxy } from './credential-proxy.js';
 import { initMemorySchema, memorySave } from './memory-db.js';
 
@@ -53,6 +59,7 @@ describe('credential-proxy', () => {
   let lastUpstreamHeaders: http.IncomingHttpHeaders;
 
   beforeEach(async () => {
+    vi.clearAllMocks();
     lastUpstreamHeaders = {};
 
     upstreamServer = http.createServer((req, res) => {
@@ -190,6 +197,139 @@ describe('credential-proxy', () => {
 
     expect(res.statusCode).toBe(502);
     expect(res.body).toBe('Bad Gateway');
+  });
+
+  it('retries after node switch when upstream returns 502', async () => {
+    const { switchToFastestNode } = await import('./clash-switcher.js');
+    (switchToFastestNode as any).mockResolvedValueOnce('日本-优化2');
+
+    let requestCount = 0;
+    upstreamServer.close();
+    upstreamServer = http.createServer((_req, res) => {
+      requestCount++;
+      if (requestCount === 1) {
+        res.writeHead(502);
+        res.end('Bad Gateway');
+      } else {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      }
+    });
+    await new Promise<void>((resolve) =>
+      upstreamServer.listen(0, '127.0.0.1', resolve),
+    );
+    const newPort = (upstreamServer.address() as AddressInfo).port;
+
+    Object.assign(mockEnv, {
+      ANTHROPIC_API_KEY: 'sk-ant-real-key',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${newPort}`,
+    });
+    proxyServer = await startCredentialProxy(0);
+    proxyPort = (proxyServer.address() as AddressInfo).port;
+
+    const res = await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: { 'content-type': 'application/json' },
+      },
+      '{}',
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(requestCount).toBe(2);
+    expect(switchToFastestNode).toHaveBeenCalledOnce();
+  });
+
+  it('returns original 503 when node switch returns null', async () => {
+    upstreamServer.close();
+    upstreamServer = http.createServer((_req, res) => {
+      res.writeHead(503);
+      res.end('Service Unavailable');
+    });
+    await new Promise<void>((resolve) =>
+      upstreamServer.listen(0, '127.0.0.1', resolve),
+    );
+    const newPort = (upstreamServer.address() as AddressInfo).port;
+
+    Object.assign(mockEnv, {
+      ANTHROPIC_API_KEY: 'sk-ant-real-key',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${newPort}`,
+    });
+    proxyServer = await startCredentialProxy(0);
+    proxyPort = (proxyServer.address() as AddressInfo).port;
+
+    const res = await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: { 'content-type': 'application/json' },
+      },
+      '{}',
+    );
+
+    expect(res.statusCode).toBe(503);
+  });
+
+  it('does not trigger failover on 429', async () => {
+    const { switchToFastestNode } = await import('./clash-switcher.js');
+
+    upstreamServer.close();
+    upstreamServer = http.createServer((_req, res) => {
+      res.writeHead(429);
+      res.end('Rate Limited');
+    });
+    await new Promise<void>((resolve) =>
+      upstreamServer.listen(0, '127.0.0.1', resolve),
+    );
+    const newPort = (upstreamServer.address() as AddressInfo).port;
+
+    Object.assign(mockEnv, {
+      ANTHROPIC_API_KEY: 'sk-ant-real-key',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${newPort}`,
+    });
+    proxyServer = await startCredentialProxy(0);
+    proxyPort = (proxyServer.address() as AddressInfo).port;
+
+    const res = await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: { 'content-type': 'application/json' },
+      },
+      '{}',
+    );
+
+    expect(res.statusCode).toBe(429);
+    expect(switchToFastestNode).not.toHaveBeenCalled();
+  });
+
+  it('retries on upstream connection error after node switch', async () => {
+    const { switchToFastestNode } = await import('./clash-switcher.js');
+    (switchToFastestNode as any).mockResolvedValueOnce('日本-优化2');
+
+    Object.assign(mockEnv, {
+      ANTHROPIC_API_KEY: 'sk-ant-real-key',
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:59999',
+    });
+    proxyServer = await startCredentialProxy(0);
+    proxyPort = (proxyServer.address() as AddressInfo).port;
+
+    const res = await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: { 'content-type': 'application/json' },
+      },
+      '{}',
+    );
+
+    expect(res.statusCode).toBe(502);
+    expect(switchToFastestNode).toHaveBeenCalledOnce();
   });
 });
 
