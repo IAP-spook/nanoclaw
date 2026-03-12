@@ -579,6 +579,14 @@ async function main(): Promise<void> {
         logger.warn({ jid }, 'No image-capable channel for JID');
       }
     },
+    sendFile: async (jid, filePath, caption) => {
+      const channel = findChannel(channels, jid);
+      if (channel?.sendFile) {
+        await channel.sendFile(jid, filePath, caption);
+      } else {
+        logger.warn({ jid }, 'No file-capable channel for JID');
+      }
+    },
     registeredGroups: () => registeredGroups,
     registerGroup,
     syncGroups: async (force: boolean) => {

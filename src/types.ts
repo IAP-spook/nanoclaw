@@ -30,6 +30,7 @@ export interface AllowedRoot {
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
+  gpu?: boolean; // Pass --gpus all to container
 }
 
 export interface RegisteredGroup {
@@ -90,6 +91,10 @@ export interface Channel {
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
+  // Optional: send an image file. Channels that support it implement it.
+  sendImage?(jid: string, imagePath: string, caption?: string): Promise<void>;
+  // Optional: send a file. Channels that support it implement it.
+  sendFile?(jid: string, filePath: string, caption?: string): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages

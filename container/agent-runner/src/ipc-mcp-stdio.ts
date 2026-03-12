@@ -340,6 +340,50 @@ Use available_groups.json to find the JID for a group. The folder name must be c
 );
 
 // ---------------------------------------------------------------------------
+// Media sending tools — write IPC task JSON for host to process
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'send_file',
+  'Send a file to the chat. Supports PDFs, documents, archives, audio, and other file types. The file must exist in your workspace.',
+  {
+    file_path: z.string().describe('Absolute path to the file (e.g., /workspace/group/report.pdf)'),
+    caption: z.string().optional().describe('Optional caption text sent with the file'),
+  },
+  async (args) => {
+    writeIpcFile(TASKS_DIR, {
+      type: 'send_file',
+      chatJid,
+      filePath: args.file_path,
+      caption: args.caption || undefined,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: 'File queued for sending.' }] };
+  },
+);
+
+server.tool(
+  'send_image',
+  'Send an image file to the chat. Use for screenshots, charts, plots, and other images.',
+  {
+    file_path: z.string().describe('Absolute path to the image file (e.g., /workspace/group/screenshot.png)'),
+    caption: z.string().optional().describe('Optional caption text sent with the image'),
+  },
+  async (args) => {
+    writeIpcFile(TASKS_DIR, {
+      type: 'send_image',
+      chatJid,
+      filePath: args.file_path,
+      caption: args.caption || undefined,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: 'Image queued for sending.' }] };
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Memory tools — talk to the host memory API via the credential proxy
 // ---------------------------------------------------------------------------
 

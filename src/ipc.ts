@@ -3,7 +3,7 @@ import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
-import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { DATA_DIR, GROUPS_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
@@ -12,6 +12,12 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendImage: (
+    jid: string,
+    imagePath: string,
+    caption?: string,
+  ) => Promise<void>;
+  sendFile: (jid: string, filePath: string, caption?: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -164,6 +170,9 @@ export async function processTaskIpc(
     groupFolder?: string;
     chatJid?: string;
     targetJid?: string;
+    // For send_image
+    filePath?: string;
+    caption?: string;
     // For register_group
     jid?: string;
     name?: string;
@@ -448,6 +457,86 @@ export async function processTaskIpc(
         );
       }
       break;
+
+    case 'send_image':
+      if (data.chatJid && data.filePath) {
+        const targetGroup = registeredGroups[data.chatJid];
+        if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
+          // Map container path to host path
+          const hostPath = data.filePath.replace(
+            /^\/workspace\/group\//,
+            path.join(GROUPS_DIR, sourceGroup) + '/',
+          );
+          await deps.sendImage(data.chatJid, hostPath, data.caption);
+          logger.info(
+            { chatJid: data.chatJid, sourceGroup, filePath: hostPath },
+            'IPC image sent',
+          );
+        } else {
+          logger.warn(
+            { chatJid: data.chatJid, sourceGroup },
+            'Unauthorized IPC send_image attempt blocked',
+          );
+        }
+      }
+      break;
+
+    case 'send_file': {
+      if (!data.chatJid || !data.filePath) break;
+
+      const targetGroup = registeredGroups[data.chatJid];
+      if (!isMain && !(targetGroup && targetGroup.folder === sourceGroup)) {
+        logger.warn(
+          { chatJid: data.chatJid, sourceGroup },
+          'Unauthorized IPC send_file attempt blocked',
+        );
+        break;
+      }
+
+      // Map container path to host path
+      const hostFilePath = data.filePath.replace(
+        /^\/workspace\/group\//,
+        path.join(GROUPS_DIR, sourceGroup) + '/',
+      );
+
+      // Path traversal guard
+      const resolved = path.resolve(hostFilePath);
+      const groupPrefix = path.resolve(path.join(GROUPS_DIR, sourceGroup));
+      if (
+        !resolved.startsWith(groupPrefix + path.sep) &&
+        resolved !== groupPrefix
+      ) {
+        logger.warn(
+          { filePath: data.filePath, resolved, groupPrefix },
+          'IPC send_file path traversal blocked',
+        );
+        break;
+      }
+
+      // File existence check
+      if (!fs.existsSync(resolved)) {
+        logger.warn({ filePath: resolved }, 'IPC send_file file not found');
+        break;
+      }
+
+      // File size check (30MB)
+      const MAX_FILE_SIZE = 31_457_280;
+      const stat = fs.statSync(resolved);
+      if (stat.size > MAX_FILE_SIZE) {
+        logger.warn(
+          { filePath: resolved, size: stat.size, maxSize: MAX_FILE_SIZE },
+          'IPC send_file exceeds size limit',
+        );
+        break;
+      }
+
+      await deps.sendFile(data.chatJid, resolved, data.caption);
+      logger.info(
+        { chatJid: data.chatJid, sourceGroup, filePath: resolved },
+        'IPC file sent',
+      );
+      break;
+    }
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
