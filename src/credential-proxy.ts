@@ -13,9 +13,12 @@
 import { createServer, Server } from 'http';
 import { request as httpsRequest } from 'https';
 import { request as httpRequest, RequestOptions } from 'http';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import type Database from 'better-sqlite3';
 
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
+import { createMemoryHandler } from './memory-api.js';
 
 export type AuthMode = 'api-key' | 'oauth';
 
@@ -26,6 +29,8 @@ export interface ProxyConfig {
 export function startCredentialProxy(
   port: number,
   host = '127.0.0.1',
+  memoryDb?: Database.Database,
+  groupsDir?: string,
 ): Promise<Server> {
   const secrets = readEnvFile([
     'ANTHROPIC_API_KEY',
@@ -44,8 +49,32 @@ export function startCredentialProxy(
   const isHttps = upstreamUrl.protocol === 'https:';
   const makeRequest = isHttps ? httpsRequest : httpRequest;
 
+  const proxyUrl =
+    process.env.HTTPS_PROXY ||
+    process.env.https_proxy ||
+    process.env.HTTP_PROXY ||
+    process.env.http_proxy;
+  const proxyAgent =
+    proxyUrl && isHttps ? new HttpsProxyAgent(proxyUrl) : undefined;
+  if (proxyAgent) {
+    logger.info(
+      { proxy: proxyUrl },
+      'Credential proxy using upstream HTTP proxy',
+    );
+  }
+
+  const memoryHandler = memoryDb
+    ? createMemoryHandler(memoryDb, groupsDir)
+    : null;
+
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
+      // Intercept /memory/* requests — handle locally, don't proxy
+      if (memoryHandler && req.url?.startsWith('/memory/')) {
+        memoryHandler(req, res);
+        return;
+      }
+
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
       req.on('end', () => {
@@ -86,6 +115,7 @@ export function startCredentialProxy(
             path: req.url,
             method: req.method,
             headers,
+            ...(proxyAgent ? { agent: proxyAgent } : {}),
           } as RequestOptions,
           (upRes) => {
             res.writeHead(upRes.statusCode!, upRes.headers);

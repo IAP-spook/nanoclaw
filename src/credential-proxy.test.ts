@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'http';
 import type { AddressInfo } from 'net';
+import Database from 'better-sqlite3';
 
 const mockEnv: Record<string, string> = {};
 vi.mock('./env.js', () => ({
@@ -12,6 +13,7 @@ vi.mock('./logger.js', () => ({
 }));
 
 import { startCredentialProxy } from './credential-proxy.js';
+import { initMemorySchema, memorySave } from './memory-db.js';
 
 function makeRequest(
   port: number,
@@ -188,5 +190,127 @@ describe('credential-proxy', () => {
 
     expect(res.statusCode).toBe(502);
     expect(res.body).toBe('Bad Gateway');
+  });
+});
+
+describe('credential-proxy memory routes', () => {
+  let proxyServer: http.Server;
+  let upstreamServer: http.Server;
+  let proxyPort: number;
+  let upstreamPort: number;
+  let upstreamHit: boolean;
+  let memDb: Database.Database;
+
+  beforeEach(async () => {
+    upstreamHit = false;
+    memDb = new Database(':memory:');
+    initMemorySchema(memDb);
+
+    upstreamServer = http.createServer((_req, res) => {
+      upstreamHit = true;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve) =>
+      upstreamServer.listen(0, '127.0.0.1', resolve),
+    );
+    upstreamPort = (upstreamServer.address() as AddressInfo).port;
+
+    Object.assign(mockEnv, {
+      ANTHROPIC_API_KEY: 'sk-ant-test',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
+    });
+    proxyServer = await startCredentialProxy(0, '127.0.0.1', memDb);
+    proxyPort = (proxyServer.address() as AddressInfo).port;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((r) => proxyServer?.close(() => r()));
+    await new Promise<void>((r) => upstreamServer?.close(() => r()));
+    memDb.close();
+    for (const key of Object.keys(mockEnv)) delete mockEnv[key];
+  });
+
+  it('handles POST /memory/save locally without hitting upstream', async () => {
+    const res = await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/memory/save',
+        headers: { 'content-type': 'application/json' },
+      },
+      JSON.stringify({
+        group_folder: 'main',
+        title: 'Proxy test',
+        content: 'Saved through proxy',
+        tags: ['test'],
+      }),
+    );
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.id).toBeGreaterThan(0);
+    expect(upstreamHit).toBe(false);
+  });
+
+  it('handles POST /memory/search locally', async () => {
+    memorySave(memDb, {
+      groupFolder: 'main',
+      title: 'Searchable entry',
+      content: 'Important knowledge about testing',
+      tags: ['test'],
+    });
+
+    const res = await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/memory/search',
+        headers: { 'content-type': 'application/json' },
+      },
+      JSON.stringify({
+        group_folder: 'main',
+        query: 'testing',
+      }),
+    );
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.length).toBe(1);
+    expect(body[0].title).toBe('Searchable entry');
+    expect(upstreamHit).toBe(false);
+  });
+
+  it('handles GET /memory/list locally', async () => {
+    memorySave(memDb, {
+      groupFolder: 'main',
+      title: 'List entry',
+      content: 'Content',
+      tags: [],
+    });
+
+    const res = await makeRequest(proxyPort, {
+      method: 'GET',
+      path: '/memory/list?group_folder=main',
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.length).toBe(1);
+    expect(upstreamHit).toBe(false);
+  });
+
+  it('still proxies non-memory requests to upstream', async () => {
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: { 'content-type': 'application/json' },
+      },
+      '{}',
+    );
+
+    expect(upstreamHit).toBe(true);
   });
 });

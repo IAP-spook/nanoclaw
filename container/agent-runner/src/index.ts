@@ -18,6 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import { autoExtractAndSave } from './memory-extract.js';
 
 interface ContainerInput {
   prompt: string;
@@ -142,7 +143,7 @@ function getSessionSummary(sessionId: string, transcriptPath: string): string | 
 /**
  * Archive the full transcript to conversations/ before compaction.
  */
-function createPreCompactHook(assistantName?: string): HookCallback {
+function createPreCompactHook(assistantName?: string, groupFolder?: string): HookCallback {
   return async (input, _toolUseId, _context) => {
     const preCompact = input as PreCompactHookInput;
     const transcriptPath = preCompact.transcript_path;
@@ -176,6 +177,25 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       fs.writeFileSync(filePath, markdown);
 
       log(`Archived conversation to ${filePath}`);
+
+      // Auto-extract knowledge from the conversation
+      if (groupFolder) {
+        const memoryBaseUrl = process.env.ANTHROPIC_BASE_URL || 'http://127.0.0.1:3001';
+        try {
+          const saved = await autoExtractAndSave(
+            memoryBaseUrl,
+            groupFolder,
+            messages,
+            summary,
+            log,
+          );
+          if (saved > 0) {
+            log(`Auto-extracted ${saved} memory entries from conversation`);
+          }
+        } catch (err) {
+          log(`Memory auto-extract failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
     } catch (err) {
       log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -425,7 +445,7 @@ async function runQuery(
         },
       },
       hooks: {
-        PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
+        PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName, containerInput.groupFolder)] }],
       },
     }
   })) {

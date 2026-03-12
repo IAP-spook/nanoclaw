@@ -10,6 +10,12 @@ import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
+import {
+  memoryClientSave,
+  memoryClientSearch,
+  memoryClientList,
+  memoryClientDelete,
+} from './memory-client.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -330,6 +336,135 @@ Use available_groups.json to find the JID for a group. The folder name must be c
     return {
       content: [{ type: 'text' as const, text: `Group "${args.name}" registered. It will start receiving messages immediately.` }],
     };
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Memory tools — talk to the host memory API via the credential proxy
+// ---------------------------------------------------------------------------
+
+const memoryBaseUrl = process.env.ANTHROPIC_BASE_URL || 'http://127.0.0.1:3001';
+
+server.tool(
+  'memory_save',
+  `Save a piece of knowledge to long-term memory. Memories persist across conversations.
+Use this to remember facts, preferences, decisions, lessons learned, or anything worth recalling later.
+If a memory with the same title already exists in this group, it will be updated (upserted).`,
+  {
+    title: z.string().describe('Short descriptive title (used as unique key within the group)'),
+    content: z.string().describe('The knowledge to remember — be specific and self-contained'),
+    tags: z.array(z.string()).default([]).describe('Optional tags for categorization (e.g., ["preference", "coding"])'),
+    source: z.string().optional().describe('Where this knowledge came from (e.g., "user request", "conversation")'),
+  },
+  async (args) => {
+    try {
+      const result = await memoryClientSave(memoryBaseUrl, {
+        group_folder: groupFolder,
+        title: args.title,
+        content: args.content,
+        tags: args.tags,
+        source: args.source,
+      });
+      return {
+        content: [{ type: 'text' as const, text: `Memory saved (id: ${result.id}): "${args.title}"` }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Failed to save memory: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'memory_search',
+  `Search long-term memory for relevant knowledge. Uses full-text search.
+Returns matching memories with content. Use this before answering questions that might benefit from prior knowledge.`,
+  {
+    query: z.string().describe('Search query — keywords or phrases to find'),
+    tags: z.array(z.string()).optional().describe('Optional: filter to memories with ALL of these tags'),
+    limit: z.number().optional().describe('Max results to return (default: 20)'),
+  },
+  async (args) => {
+    try {
+      const results = await memoryClientSearch(memoryBaseUrl, {
+        group_folder: groupFolder,
+        query: args.query,
+        tags: args.tags,
+        limit: args.limit,
+      });
+      if (results.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'No matching memories found.' }] };
+      }
+      const formatted = results
+        .map(
+          (r) =>
+            `[${r.id}] ${r.title}\n  Tags: ${r.tags.join(', ') || 'none'}\n  Updated: ${r.updated_at}\n  ${r.content}`,
+        )
+        .join('\n\n');
+      return { content: [{ type: 'text' as const, text: `Found ${results.length} memor${results.length === 1 ? 'y' : 'ies'}:\n\n${formatted}` }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Memory search failed: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'memory_list',
+  `List all memories in this group (summaries without full content). Use memory_search for content-based lookup.`,
+  {
+    tags: z.array(z.string()).optional().describe('Optional: filter to memories with ALL of these tags'),
+  },
+  async (args) => {
+    try {
+      const results = await memoryClientList(memoryBaseUrl, {
+        group_folder: groupFolder,
+        tags: args.tags,
+      });
+      if (results.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'No memories stored yet.' }] };
+      }
+      const formatted = results
+        .map(
+          (r) => `[${r.id}] ${r.title}  (tags: ${r.tags.join(', ') || 'none'}, updated: ${r.updated_at})`,
+        )
+        .join('\n');
+      return { content: [{ type: 'text' as const, text: `${results.length} memor${results.length === 1 ? 'y' : 'ies'}:\n${formatted}` }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Memory list failed: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'memory_delete',
+  `Delete a memory by ID. You can only delete memories belonging to your own group (main group can also delete global memories).`,
+  {
+    id: z.number().describe('The memory ID to delete (from memory_list or memory_search results)'),
+  },
+  async (args) => {
+    try {
+      const result = await memoryClientDelete(memoryBaseUrl, {
+        id: args.id,
+        group_folder: groupFolder,
+      });
+      if (result.deleted) {
+        return { content: [{ type: 'text' as const, text: `Memory ${args.id} deleted.` }] };
+      }
+      return { content: [{ type: 'text' as const, text: `Memory ${args.id} not found or not authorized to delete.` }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Memory delete failed: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
   },
 );
 

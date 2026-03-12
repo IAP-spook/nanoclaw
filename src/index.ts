@@ -4,6 +4,7 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
+  GROUPS_DIR,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
   TIMEZONE,
@@ -31,6 +32,7 @@ import {
   getAllRegisteredGroups,
   getAllSessions,
   getAllTasks,
+  getDatabase,
   getMessagesSince,
   getNewMessages,
   getRegisteredGroup,
@@ -42,6 +44,8 @@ import {
   storeChatMetadata,
   storeMessage,
 } from './db.js';
+import { initMemorySchema } from './memory-db.js';
+import { seedMemoryEntries } from './memory-seed.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
@@ -468,6 +472,8 @@ function ensureContainerSystemRunning(): void {
 async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
+  initMemorySchema(getDatabase());
+  seedMemoryEntries(getDatabase(), GROUPS_DIR, 'main');
   logger.info('Database initialized');
   loadState();
 
@@ -475,6 +481,8 @@ async function main(): Promise<void> {
   const proxyServer = await startCredentialProxy(
     CREDENTIAL_PROXY_PORT,
     PROXY_BIND_HOST,
+    getDatabase(),
+    GROUPS_DIR,
   );
 
   // Graceful shutdown handlers
@@ -562,6 +570,14 @@ async function main(): Promise<void> {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text);
+    },
+    sendImage: async (jid, imagePath, caption) => {
+      const channel = findChannel(channels, jid);
+      if (channel?.sendImage) {
+        await channel.sendImage(jid, imagePath, caption);
+      } else {
+        logger.warn({ jid }, 'No image-capable channel for JID');
+      }
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
