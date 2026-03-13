@@ -34,16 +34,15 @@ describe('GroupQueue', () => {
     vi.useRealTimers();
   });
 
-  // --- Single group at a time ---
+  // --- Single group at a time (same-type serialization) ---
 
-  it('only runs one container per group at a time', async () => {
+  it('only runs one message container per group at a time', async () => {
     let concurrentCount = 0;
     let maxConcurrent = 0;
 
     const processMessages = vi.fn(async (groupJid: string) => {
       concurrentCount++;
       maxConcurrent = Math.max(maxConcurrent, concurrentCount);
-      // Simulate async work
       await new Promise((resolve) => setTimeout(resolve, 100));
       concurrentCount--;
       return true;
@@ -98,44 +97,36 @@ describe('GroupQueue', () => {
     expect(processMessages).toHaveBeenCalledTimes(3);
   });
 
-  // --- Tasks prioritized over messages ---
+  // --- Pending tasks drain in the task slot ---
 
-  it('drains tasks before messages for same group', async () => {
+  it('drains pending tasks in the task slot', async () => {
     const executionOrder: string[] = [];
     let resolveFirst: () => void;
 
-    const processMessages = vi.fn(async (groupJid: string) => {
-      if (executionOrder.length === 0) {
-        // First call: block until we release it
-        await new Promise<void>((resolve) => {
-          resolveFirst = resolve;
-        });
-      }
-      executionOrder.push('messages');
-      return true;
+    const taskFn1 = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveFirst = resolve;
+      });
+      executionOrder.push('task-1');
     });
 
-    queue.setProcessMessagesFn(processMessages);
+    const taskFn2 = vi.fn(async () => {
+      executionOrder.push('task-2');
+    });
 
-    // Start processing messages (takes the active slot)
-    queue.enqueueMessageCheck('group1@g.us');
+    // Start first task (takes the task slot)
+    queue.enqueueTask('group1@g.us', 'task-1', taskFn1);
     await vi.advanceTimersByTimeAsync(10);
 
-    // While active, enqueue both a task and pending messages
-    const taskFn = vi.fn(async () => {
-      executionOrder.push('task');
-    });
-    queue.enqueueTask('group1@g.us', 'task-1', taskFn);
-    queue.enqueueMessageCheck('group1@g.us');
+    // Queue second task while first is running
+    queue.enqueueTask('group1@g.us', 'task-2', taskFn2);
 
-    // Release the first processing
+    // Release the first task
     resolveFirst!();
     await vi.advanceTimersByTimeAsync(10);
 
-    // Task should have run before the second message check
-    expect(executionOrder[0]).toBe('messages'); // first call
-    expect(executionOrder[1]).toBe('task'); // task runs first in drain
-    // Messages would run after task completes
+    // Both tasks ran in order
+    expect(executionOrder).toEqual(['task-1', 'task-2']);
   });
 
   // --- Retry with backoff on failure ---
@@ -243,7 +234,7 @@ describe('GroupQueue', () => {
     expect(processed).toContain('group3@g.us');
   });
 
-  // --- Running task dedup (Issue #138) ---
+  // --- Running task dedup ---
 
   it('rejects duplicate enqueue of a currently-running task', async () => {
     let resolveTask: () => void;
@@ -278,11 +269,11 @@ describe('GroupQueue', () => {
     expect(taskCallCount).toBe(1);
   });
 
-  // --- Idle preemption ---
+  // --- Dual slot: task starts in its own slot while message is running ---
 
-  it('does NOT preempt active container when not idle', async () => {
-    const fs = await import('fs');
+  it('task starts in its own slot while message container is still running', async () => {
     let resolveProcess: () => void;
+    let taskStarted = false;
 
     const processMessages = vi.fn(async () => {
       await new Promise<void>((resolve) => {
@@ -293,120 +284,25 @@ describe('GroupQueue', () => {
 
     queue.setProcessMessagesFn(processMessages);
 
-    // Start processing (takes the active slot)
+    // Start processing (takes the message slot)
     queue.enqueueMessageCheck('group1@g.us');
     await vi.advanceTimersByTimeAsync(10);
 
-    // Register a process so closeStdin has a groupFolder
-    queue.registerProcess(
-      'group1@g.us',
-      {} as any,
-      'container-1',
-      'test-group',
-    );
-
-    // Enqueue a task while container is active but NOT idle
-    const taskFn = vi.fn(async () => {});
-    queue.enqueueTask('group1@g.us', 'task-1', taskFn);
-
-    // _close should NOT have been written (container is working, not idle)
-    const writeFileSync = vi.mocked(fs.default.writeFileSync);
-    const closeWrites = writeFileSync.mock.calls.filter(
-      (call) => typeof call[0] === 'string' && call[0].endsWith('_close'),
-    );
-    expect(closeWrites).toHaveLength(0);
-
-    resolveProcess!();
-    await vi.advanceTimersByTimeAsync(10);
-  });
-
-  it('preempts idle container when task is enqueued', async () => {
-    const fs = await import('fs');
-    let resolveProcess: () => void;
-
-    const processMessages = vi.fn(async () => {
-      await new Promise<void>((resolve) => {
-        resolveProcess = resolve;
-      });
-      return true;
+    // Enqueue a task — should start immediately in its own slot
+    const taskFn = vi.fn(async () => {
+      taskStarted = true;
     });
-
-    queue.setProcessMessagesFn(processMessages);
-
-    // Start processing
-    queue.enqueueMessageCheck('group1@g.us');
+    queue.enqueueTask('group1@g.us', 'task-1', taskFn);
     await vi.advanceTimersByTimeAsync(10);
 
-    // Register process and mark idle
-    queue.registerProcess(
-      'group1@g.us',
-      {} as any,
-      'container-1',
-      'test-group',
-    );
-    queue.notifyIdle('group1@g.us');
-
-    // Clear previous writes, then enqueue a task
-    const writeFileSync = vi.mocked(fs.default.writeFileSync);
-    writeFileSync.mockClear();
-
-    const taskFn = vi.fn(async () => {});
-    queue.enqueueTask('group1@g.us', 'task-1', taskFn);
-
-    // _close SHOULD have been written (container is idle)
-    const closeWrites = writeFileSync.mock.calls.filter(
-      (call) => typeof call[0] === 'string' && call[0].endsWith('_close'),
-    );
-    expect(closeWrites).toHaveLength(1);
+    // Task started in its own slot while message container is still running
+    expect(taskStarted).toBe(true);
 
     resolveProcess!();
     await vi.advanceTimersByTimeAsync(10);
   });
 
-  it('sendMessage resets idleWaiting so a subsequent task enqueue does not preempt', async () => {
-    const fs = await import('fs');
-    let resolveProcess: () => void;
-
-    const processMessages = vi.fn(async () => {
-      await new Promise<void>((resolve) => {
-        resolveProcess = resolve;
-      });
-      return true;
-    });
-
-    queue.setProcessMessagesFn(processMessages);
-    queue.enqueueMessageCheck('group1@g.us');
-    await vi.advanceTimersByTimeAsync(10);
-    queue.registerProcess(
-      'group1@g.us',
-      {} as any,
-      'container-1',
-      'test-group',
-    );
-
-    // Container becomes idle
-    queue.notifyIdle('group1@g.us');
-
-    // A new user message arrives — resets idleWaiting
-    queue.sendMessage('group1@g.us', 'hello');
-
-    // Task enqueued after message reset — should NOT preempt (agent is working)
-    const writeFileSync = vi.mocked(fs.default.writeFileSync);
-    writeFileSync.mockClear();
-
-    const taskFn = vi.fn(async () => {});
-    queue.enqueueTask('group1@g.us', 'task-1', taskFn);
-
-    const closeWrites = writeFileSync.mock.calls.filter(
-      (call) => typeof call[0] === 'string' && call[0].endsWith('_close'),
-    );
-    expect(closeWrites).toHaveLength(0);
-
-    resolveProcess!();
-    await vi.advanceTimersByTimeAsync(10);
-  });
-
-  it('sendMessage returns false for task containers so user messages queue up', async () => {
+  it('sendMessage returns false when no message container is active', async () => {
     let resolveTask: () => void;
 
     const taskFn = vi.fn(async () => {
@@ -415,7 +311,7 @@ describe('GroupQueue', () => {
       });
     });
 
-    // Start a task (sets isTaskContainer = true)
+    // Start a task (only task slot active, message slot inactive)
     queue.enqueueTask('group1@g.us', 'task-1', taskFn);
     await vi.advanceTimersByTimeAsync(10);
     queue.registerProcess(
@@ -423,9 +319,10 @@ describe('GroupQueue', () => {
       {} as any,
       'container-1',
       'test-group',
+      'task',
     );
 
-    // sendMessage should return false — user messages must not go to task containers
+    // sendMessage should return false — no active message container
     const result = queue.sendMessage('group1@g.us', 'hello');
     expect(result).toBe(false);
 
@@ -433,7 +330,188 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(10);
   });
 
-  it('preempts when idle arrives with pending tasks', async () => {
+  // --- New dual-slot tests ---
+
+  it('allows message and task containers to run in parallel for same group', async () => {
+    let messageRunning = false;
+    let taskRunning = false;
+    let bothRunning = false;
+    let resolveMessage: () => void;
+    let resolveTask: () => void;
+
+    const processMessages = vi.fn(async () => {
+      messageRunning = true;
+      bothRunning = bothRunning || (messageRunning && taskRunning);
+      await new Promise<void>((resolve) => {
+        resolveMessage = resolve;
+      });
+      messageRunning = false;
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+
+    // Start message container
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Start task container for same group
+    const taskFn = vi.fn(async () => {
+      taskRunning = true;
+      bothRunning = bothRunning || (messageRunning && taskRunning);
+      await new Promise<void>((resolve) => {
+        resolveTask = resolve;
+      });
+      taskRunning = false;
+    });
+    queue.enqueueTask('group1@g.us', 'task-1', taskFn);
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Both should have been running concurrently
+    expect(bothRunning).toBe(true);
+
+    resolveMessage!();
+    resolveTask!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('allows message container to start while task is running for same group', async () => {
+    let resolveTask: () => void;
+    let messageStarted = false;
+
+    const processMessages = vi.fn(async () => {
+      messageStarted = true;
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+
+    // Start task first
+    const taskFn = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveTask = resolve;
+      });
+    });
+    queue.enqueueTask('group1@g.us', 'task-1', taskFn);
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Enqueue a message check — should start immediately (different slot)
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(messageStarted).toBe(true);
+
+    resolveTask!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('serializes two messages for same group (same-type serial)', async () => {
+    let concurrentMessages = 0;
+    let maxConcurrentMessages = 0;
+    const completionCallbacks: Array<() => void> = [];
+
+    const processMessages = vi.fn(async () => {
+      concurrentMessages++;
+      maxConcurrentMessages = Math.max(maxConcurrentMessages, concurrentMessages);
+      await new Promise<void>((resolve) => completionCallbacks.push(resolve));
+      concurrentMessages--;
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+
+    queue.enqueueMessageCheck('group1@g.us');
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(maxConcurrentMessages).toBe(1);
+
+    // Complete first, second should start
+    completionCallbacks[0]();
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(processMessages).toHaveBeenCalledTimes(2);
+    expect(maxConcurrentMessages).toBe(1);
+  });
+
+  it('serializes two tasks for same group (same-type serial)', async () => {
+    let concurrentTasks = 0;
+    let maxConcurrentTasks = 0;
+    const completionCallbacks: Array<() => void> = [];
+
+    const taskFn1 = vi.fn(async () => {
+      concurrentTasks++;
+      maxConcurrentTasks = Math.max(maxConcurrentTasks, concurrentTasks);
+      await new Promise<void>((resolve) => completionCallbacks.push(resolve));
+      concurrentTasks--;
+    });
+
+    const taskFn2 = vi.fn(async () => {
+      concurrentTasks++;
+      maxConcurrentTasks = Math.max(maxConcurrentTasks, concurrentTasks);
+      await new Promise<void>((resolve) => completionCallbacks.push(resolve));
+      concurrentTasks--;
+    });
+
+    queue.enqueueTask('group1@g.us', 'task-1', taskFn1);
+    queue.enqueueTask('group1@g.us', 'task-2', taskFn2);
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(maxConcurrentTasks).toBe(1);
+
+    // Complete first task, second should start
+    completionCallbacks[0]();
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(taskFn2).toHaveBeenCalled();
+    expect(maxConcurrentTasks).toBe(1);
+  });
+
+  it('counts both message and task containers toward global concurrency limit', async () => {
+    let resolveMessage: () => void;
+    let resolveTask: () => void;
+
+    const processMessages = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveMessage = resolve;
+      });
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+
+    // Start message for group1 (slot 1 of 2)
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Start task for group1 (slot 2 of 2)
+    const taskFn = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveTask = resolve;
+      });
+    });
+    queue.enqueueTask('group1@g.us', 'task-1', taskFn);
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Now at limit (2). A third group should be queued.
+    const thirdGroupStarted = vi.fn(async () => true);
+    queue.setProcessMessagesFn(thirdGroupStarted);
+    queue.enqueueMessageCheck('group2@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(thirdGroupStarted).not.toHaveBeenCalled();
+
+    // Free one slot
+    resolveTask!();
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(thirdGroupStarted).toHaveBeenCalled();
+
+    resolveMessage!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('closeStdin for message writes _close to input dir', async () => {
     const fs = await import('fs');
     let resolveProcess: () => void;
 
@@ -445,40 +523,142 @@ describe('GroupQueue', () => {
     });
 
     queue.setProcessMessagesFn(processMessages);
-
-    // Start processing
     queue.enqueueMessageCheck('group1@g.us');
     await vi.advanceTimersByTimeAsync(10);
-
-    // Register process and enqueue a task (no idle yet — no preemption)
-    queue.registerProcess(
-      'group1@g.us',
-      {} as any,
-      'container-1',
-      'test-group',
-    );
+    queue.registerProcess('group1@g.us', {} as any, 'container-1', 'test-group', 'message');
 
     const writeFileSync = vi.mocked(fs.default.writeFileSync);
     writeFileSync.mockClear();
 
-    const taskFn = vi.fn(async () => {});
-    queue.enqueueTask('group1@g.us', 'task-1', taskFn);
+    queue.closeStdin('group1@g.us', 'message');
 
-    let closeWrites = writeFileSync.mock.calls.filter(
-      (call) => typeof call[0] === 'string' && call[0].endsWith('_close'),
-    );
-    expect(closeWrites).toHaveLength(0);
-
-    // Now container becomes idle — should preempt because task is pending
-    writeFileSync.mockClear();
-    queue.notifyIdle('group1@g.us');
-
-    closeWrites = writeFileSync.mock.calls.filter(
+    const closeWrites = writeFileSync.mock.calls.filter(
       (call) => typeof call[0] === 'string' && call[0].endsWith('_close'),
     );
     expect(closeWrites).toHaveLength(1);
+    expect(closeWrites[0][0]).toContain('/input/_close');
+    expect(closeWrites[0][0]).not.toContain('task-input');
 
     resolveProcess!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('closeStdin for task writes _close to task-input dir', async () => {
+    const fs = await import('fs');
+    let resolveTask: () => void;
+
+    const taskFn = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveTask = resolve;
+      });
+    });
+
+    queue.enqueueTask('group1@g.us', 'task-1', taskFn);
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess('group1@g.us', {} as any, 'container-1', 'test-group', 'task');
+
+    const writeFileSync = vi.mocked(fs.default.writeFileSync);
+    writeFileSync.mockClear();
+
+    queue.closeStdin('group1@g.us', 'task');
+
+    const closeWrites = writeFileSync.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].endsWith('_close'),
+    );
+    expect(closeWrites).toHaveLength(1);
+    expect(closeWrites[0][0]).toContain('/task-input/_close');
+
+    resolveTask!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('message slot freeing drains pending messages, not tasks', async () => {
+    const executionOrder: string[] = [];
+    let resolveFirst: () => void;
+
+    const processMessages = vi.fn(async () => {
+      if (executionOrder.length === 0) {
+        await new Promise<void>((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      executionOrder.push('messages');
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+
+    // Start message container
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Queue a pending message while message container is active
+    queue.enqueueMessageCheck('group1@g.us');
+
+    // Also queue a task — this should start in its own slot immediately
+    const taskFn = vi.fn(async () => {
+      executionOrder.push('task');
+    });
+    queue.enqueueTask('group1@g.us', 'task-1', taskFn);
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Task ran immediately in its own slot
+    expect(executionOrder).toContain('task');
+
+    // Release the first message container
+    resolveFirst!();
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Pending message should have been drained
+    const messageCount = executionOrder.filter((e) => e === 'messages').length;
+    expect(messageCount).toBe(2); // first + drained
+  });
+
+  it('shutdown reports containers from both message and task slots', async () => {
+    let resolveMessage: () => void;
+    let resolveTask: () => void;
+
+    const processMessages = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveMessage = resolve;
+      });
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+
+    // Start message container
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    const mockMessageProc = { killed: false } as any;
+    queue.registerProcess('group1@g.us', mockMessageProc, 'msg-container', 'test-group', 'message');
+
+    // Start task container
+    const taskFn = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveTask = resolve;
+      });
+    });
+    queue.enqueueTask('group1@g.us', 'task-1', taskFn);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const mockTaskProc = { killed: false } as any;
+    queue.registerProcess('group1@g.us', mockTaskProc, 'task-container', 'test-group', 'task');
+
+    // Shutdown should see both containers
+    await queue.shutdown(1000);
+
+    // Verify shutdown doesn't throw and queue is in shutdown state
+    // (The logger.info call in shutdown would list both containers;
+    // we verify by ensuring no new enqueues are accepted)
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    // processMessages was called only once (before shutdown)
+    expect(processMessages).toHaveBeenCalledTimes(1);
+
+    resolveMessage!();
+    resolveTask!();
     await vi.advanceTimersByTimeAsync(10);
   });
 });
