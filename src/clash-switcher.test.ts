@@ -24,6 +24,7 @@ function createMockClashServer(
   process.env.CLASH_SELECTOR = '节点选择';
   process.env.CLASH_NODE_PREFIX = '日本';
   process.env.CLASH_STABILIZATION_DELAY_MS = '0';
+  process.env.CLASH_STABILITY_ROUNDS = '1';
 
   mockServer = http.createServer(handler);
   return new Promise((resolve) => {
@@ -36,6 +37,7 @@ async function cleanupMockServer(): Promise<void> {
   delete process.env.CLASH_SELECTOR;
   delete process.env.CLASH_NODE_PREFIX;
   delete process.env.CLASH_STABILIZATION_DELAY_MS;
+  delete process.env.CLASH_STABILITY_ROUNDS;
   if (mockServer) {
     await new Promise<void>((r) => mockServer.close(() => r()));
   }
@@ -129,6 +131,199 @@ describe('switchToFastestNode', () => {
     });
 
     const result = await switchToFastestNode();
+
+    expect(result).toBe('日本-优化3');
+    expect(switchedTo).toBe('日本-优化3');
+  });
+
+  it('excludes specified nodes from candidates', async () => {
+    const delays: Record<string, number> = {
+      '日本-优化3': 80,
+      '日本JP-HY2': 200,
+    };
+    let switchedTo: string | null = null;
+
+    await createMockClashServer((req, res) => {
+      const url = decodeURIComponent(req.url ?? '');
+
+      if (req.method === 'GET' && url === '/proxies/节点选择') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            name: '节点选择',
+            type: 'Selector',
+            now: '日本-优化',
+            all: ['日本-优化', '日本-优化2', '日本-优化3', '日本JP-HY2'],
+          }),
+        );
+        return;
+      }
+
+      if (req.method === 'GET' && url.includes('/delay')) {
+        const nodeName = decodeURIComponent(
+          (req.url ?? '').split('/proxies/')[1].split('/delay')[0],
+        );
+        const delay = delays[nodeName] ?? Infinity;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ delay }));
+        return;
+      }
+
+      if (req.method === 'PUT' && url.startsWith('/proxies/')) {
+        const chunks: Buffer[] = [];
+        req.on('data', (c) => chunks.push(c));
+        req.on('end', () => {
+          const body = JSON.parse(Buffer.concat(chunks).toString());
+          switchedTo = body.name;
+          res.writeHead(204);
+          res.end();
+        });
+        return;
+      }
+
+      res.writeHead(404);
+      res.end();
+    });
+
+    // Exclude 日本-优化2 (would otherwise be a candidate)
+    const result = await switchToFastestNode(['日本-优化2']);
+
+    expect(result).toBe('日本-优化3');
+    expect(switchedTo).toBe('日本-优化3');
+  });
+
+  it('prefers stable node (3/3) over faster but unstable node (2/3)', async () => {
+    // Node B: fast but fails 1 out of 3 tests
+    // Node C: slower but succeeds all 3 tests
+    // Expected: pick C (higher success rate wins)
+    const delayCallCount: Record<string, number> = {};
+    const delayResponses: Record<string, number[]> = {
+      '日本-优化2': [50, -1, 60], // -1 = timeout/fail
+      '日本-优化3': [200, 180, 190],
+    };
+    let switchedTo: string | null = null;
+
+    await createMockClashServer((req, res) => {
+      const url = decodeURIComponent(req.url ?? '');
+
+      if (req.method === 'GET' && url === '/proxies/节点选择') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            name: '节点选择',
+            type: 'Selector',
+            now: '日本-优化',
+            all: ['日本-优化', '日本-优化2', '日本-优化3'],
+          }),
+        );
+        return;
+      }
+
+      if (req.method === 'GET' && url.includes('/delay')) {
+        const nodeName = decodeURIComponent(
+          (req.url ?? '').split('/proxies/')[1].split('/delay')[0],
+        );
+        const count = delayCallCount[nodeName] ?? 0;
+        delayCallCount[nodeName] = count + 1;
+        const responses = delayResponses[nodeName];
+        if (responses) {
+          const val = responses[count % responses.length];
+          if (val === -1) {
+            // Simulate timeout
+            res.writeHead(408);
+            res.end();
+          } else {
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ delay: val }));
+          }
+        } else {
+          res.writeHead(408);
+          res.end();
+        }
+        return;
+      }
+
+      if (req.method === 'PUT' && url.startsWith('/proxies/')) {
+        const chunks: Buffer[] = [];
+        req.on('data', (c) => chunks.push(c));
+        req.on('end', () => {
+          const body = JSON.parse(Buffer.concat(chunks).toString());
+          switchedTo = body.name;
+          res.writeHead(204);
+          res.end();
+        });
+        return;
+      }
+
+      res.writeHead(404);
+      res.end();
+    });
+
+    process.env.CLASH_STABILITY_ROUNDS = '3';
+    const result = await switchToFastestNode();
+    delete process.env.CLASH_STABILITY_ROUNDS;
+
+    expect(result).toBe('日本-优化3');
+    expect(switchedTo).toBe('日本-优化3');
+  });
+
+  it('when success rate is equal, picks lower median delay', async () => {
+    // Both nodes succeed 3/3, but different latencies
+    const delayCallCount: Record<string, number> = {};
+    const delayResponses: Record<string, number[]> = {
+      '日本-优化2': [300, 250, 280], // median 280
+      '日本-优化3': [150, 120, 140], // median 140
+    };
+    let switchedTo: string | null = null;
+
+    await createMockClashServer((req, res) => {
+      const url = decodeURIComponent(req.url ?? '');
+
+      if (req.method === 'GET' && url === '/proxies/节点选择') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            name: '节点选择',
+            type: 'Selector',
+            now: '日本-优化',
+            all: ['日本-优化', '日本-优化2', '日本-优化3'],
+          }),
+        );
+        return;
+      }
+
+      if (req.method === 'GET' && url.includes('/delay')) {
+        const nodeName = decodeURIComponent(
+          (req.url ?? '').split('/proxies/')[1].split('/delay')[0],
+        );
+        const count = delayCallCount[nodeName] ?? 0;
+        delayCallCount[nodeName] = count + 1;
+        const responses = delayResponses[nodeName];
+        const val = responses?.[count % responses.length] ?? Infinity;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ delay: val }));
+        return;
+      }
+
+      if (req.method === 'PUT' && url.startsWith('/proxies/')) {
+        const chunks: Buffer[] = [];
+        req.on('data', (c) => chunks.push(c));
+        req.on('end', () => {
+          const body = JSON.parse(Buffer.concat(chunks).toString());
+          switchedTo = body.name;
+          res.writeHead(204);
+          res.end();
+        });
+        return;
+      }
+
+      res.writeHead(404);
+      res.end();
+    });
+
+    process.env.CLASH_STABILITY_ROUNDS = '3';
+    const result = await switchToFastestNode();
+    delete process.env.CLASH_STABILITY_ROUNDS;
 
     expect(result).toBe('日本-优化3');
     expect(switchedTo).toBe('日本-优化3');

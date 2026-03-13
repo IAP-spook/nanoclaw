@@ -75,6 +75,11 @@ async function getSelector(): Promise<SelectorInfo | null> {
   }
 }
 
+function getStabilityRounds(): number {
+  const val = process.env.CLASH_STABILITY_ROUNDS;
+  return val !== undefined ? parseInt(val, 10) : 3;
+}
+
 async function testNodeDelay(nodeName: string): Promise<number> {
   try {
     const encoded = `/proxies/${encodeURIComponent(nodeName)}/delay?timeout=${DELAY_TIMEOUT}&url=${encodeURIComponent(DELAY_TEST_URL)}`;
@@ -85,6 +90,34 @@ async function testNodeDelay(nodeName: string): Promise<number> {
   } catch {
     return Infinity;
   }
+}
+
+interface NodeScore {
+  name: string;
+  successRate: number;
+  medianDelay: number;
+}
+
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
+async function testNodeStability(
+  nodeName: string,
+  rounds: number,
+): Promise<NodeScore> {
+  const delays: number[] = [];
+  for (let i = 0; i < rounds; i++) {
+    delays.push(await testNodeDelay(nodeName));
+  }
+  const successes = delays.filter((d) => d !== Infinity);
+  const successRate = successes.length / rounds;
+  const medianDelay = successes.length > 0 ? median(successes) : Infinity;
+  return { name: nodeName, successRate, medianDelay };
 }
 
 async function switchNode(nodeName: string): Promise<boolean> {
@@ -105,7 +138,9 @@ async function switchNode(nodeName: string): Promise<boolean> {
 // Mutex: only one failover at a time
 let pendingSwitch: Promise<string | null> | null = null;
 
-export async function switchToFastestNode(): Promise<string | null> {
+export async function switchToFastestNode(
+  excludeNodes?: string[],
+): Promise<string | null> {
   if (pendingSwitch) return pendingSwitch;
 
   pendingSwitch = (async () => {
@@ -118,8 +153,10 @@ export async function switchToFastestNode(): Promise<string | null> {
 
       const currentNode = selector.now;
       const nodePrefix = getNodePrefix();
+      const excluded = new Set(excludeNodes ?? []);
+      if (currentNode) excluded.add(currentNode);
       const candidates = selector.all.filter(
-        (n) => n.startsWith(nodePrefix) && n !== currentNode,
+        (n) => n.startsWith(nodePrefix) && !excluded.has(n),
       );
 
       if (candidates.length === 0) {
@@ -127,28 +164,36 @@ export async function switchToFastestNode(): Promise<string | null> {
         return null;
       }
 
+      const rounds = getStabilityRounds();
       logger.info(
-        { currentNode, candidates: candidates.length },
-        'Testing node latencies for failover',
+        { currentNode, candidates: candidates.length, rounds },
+        'Testing node stability for failover',
       );
 
       const results = await Promise.all(
-        candidates.map(async (name) => ({
-          name,
-          delay: await testNodeDelay(name),
-        })),
+        candidates.map((name) => testNodeStability(name, rounds)),
       );
 
-      results.sort((a, b) => a.delay - b.delay);
+      // Sort by success rate desc, then median delay asc
+      results.sort((a, b) => {
+        if (b.successRate !== a.successRate)
+          return b.successRate - a.successRate;
+        return a.medianDelay - b.medianDelay;
+      });
       const best = results[0];
 
-      if (!best || best.delay === Infinity) {
+      if (!best || best.successRate === 0) {
         logger.error('All candidate nodes unreachable');
         return null;
       }
 
       logger.info(
-        { from: currentNode, to: best.name, delay: best.delay },
+        {
+          from: currentNode,
+          to: best.name,
+          successRate: best.successRate,
+          medianDelay: best.medianDelay,
+        },
         'Switching Clash node',
       );
 

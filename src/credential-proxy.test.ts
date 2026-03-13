@@ -240,6 +240,55 @@ describe('credential-proxy', () => {
     expect(res.statusCode).toBe(200);
     expect(requestCount).toBe(2);
     expect(switchToFastestNode).toHaveBeenCalledOnce();
+    expect(switchToFastestNode).toHaveBeenCalledWith([]);
+  });
+
+  it('retries multiple times on consecutive failures', async () => {
+    const { switchToFastestNode } = await import('./clash-switcher.js');
+    (switchToFastestNode as any)
+      .mockResolvedValueOnce('日本-优化2')
+      .mockResolvedValueOnce('日本-优化3');
+
+    let requestCount = 0;
+    upstreamServer.close();
+    upstreamServer = http.createServer((_req, res) => {
+      requestCount++;
+      if (requestCount <= 2) {
+        res.writeHead(502);
+        res.end('Bad Gateway');
+      } else {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      }
+    });
+    await new Promise<void>((resolve) =>
+      upstreamServer.listen(0, '127.0.0.1', resolve),
+    );
+    const newPort = (upstreamServer.address() as AddressInfo).port;
+
+    Object.assign(mockEnv, {
+      ANTHROPIC_API_KEY: 'sk-ant-real-key',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${newPort}`,
+    });
+    proxyServer = await startCredentialProxy(0);
+    proxyPort = (proxyServer.address() as AddressInfo).port;
+
+    const res = await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: { 'content-type': 'application/json' },
+      },
+      '{}',
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(requestCount).toBe(3);
+    expect(switchToFastestNode).toHaveBeenCalledTimes(2);
+    // First call with empty exclude list, second excludes the first switched node
+    expect(switchToFastestNode).toHaveBeenNthCalledWith(1, []);
+    expect(switchToFastestNode).toHaveBeenNthCalledWith(2, ['日本-优化2']);
   });
 
   it('returns original 503 when node switch returns null', async () => {
@@ -309,6 +358,7 @@ describe('credential-proxy', () => {
 
   it('retries on upstream connection error after node switch', async () => {
     const { switchToFastestNode } = await import('./clash-switcher.js');
+    // First switch succeeds, subsequent switches return null (no more nodes)
     (switchToFastestNode as any).mockResolvedValueOnce('日本-优化2');
 
     Object.assign(mockEnv, {
@@ -329,7 +379,8 @@ describe('credential-proxy', () => {
     );
 
     expect(res.statusCode).toBe(502);
-    expect(switchToFastestNode).toHaveBeenCalledOnce();
+    // Called twice: first attempt switches, retry also fails and tries again
+    expect(switchToFastestNode).toHaveBeenCalledTimes(2);
   });
 });
 

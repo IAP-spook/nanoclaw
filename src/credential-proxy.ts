@@ -119,27 +119,36 @@ export function startCredentialProxy(
         };
 
         const RETRIABLE_STATUSES = new Set([502, 503, 504]);
+        const MAX_RETRIES = 3;
 
-        function sendUpstreamRequest(isRetry: boolean): void {
+        function sendUpstreamRequest(
+          attempt: number,
+          triedNodes: string[],
+        ): void {
+          const canRetry = attempt < MAX_RETRIES;
+
           const upstream = makeRequest(requestOpts, (upRes) => {
             const status = upRes.statusCode!;
 
-            if (!isRetry && RETRIABLE_STATUSES.has(status)) {
+            if (canRetry && RETRIABLE_STATUSES.has(status)) {
               // Delay writeHead — consume error body, then try failover
               upRes.resume();
               upRes.on('end', () => {
                 logger.warn(
-                  { status, url: req.url },
+                  { status, url: req.url, attempt },
                   'Upstream returned retriable status, attempting node switch',
                 );
-                switchToFastestNode()
+                switchToFastestNode(triedNodes)
                   .then((newNode) => {
                     if (newNode) {
                       logger.info(
-                        { newNode },
+                        { newNode, attempt },
                         'Node switched, retrying request',
                       );
-                      sendUpstreamRequest(true);
+                      sendUpstreamRequest(attempt + 1, [
+                        ...triedNodes,
+                        newNode,
+                      ]);
                     } else {
                       if (!res.headersSent) {
                         res.writeHead(status);
@@ -163,16 +172,19 @@ export function startCredentialProxy(
           });
 
           upstream.on('error', (err) => {
-            if (!isRetry) {
+            if (canRetry) {
               logger.warn(
-                { err, url: req.url },
+                { err, url: req.url, attempt },
                 'Upstream connection failed, attempting node switch',
               );
-              switchToFastestNode()
+              switchToFastestNode(triedNodes)
                 .then((newNode) => {
                   if (newNode) {
-                    logger.info({ newNode }, 'Node switched, retrying request');
-                    sendUpstreamRequest(true);
+                    logger.info(
+                      { newNode, attempt },
+                      'Node switched, retrying request',
+                    );
+                    sendUpstreamRequest(attempt + 1, [...triedNodes, newNode]);
                   } else {
                     if (!res.headersSent) {
                       res.writeHead(502);
@@ -190,8 +202,8 @@ export function startCredentialProxy(
             }
 
             logger.error(
-              { err, url: req.url },
-              'Credential proxy upstream error (after retry)',
+              { err, url: req.url, attempt },
+              'Credential proxy upstream error (retries exhausted)',
             );
             if (!res.headersSent) {
               res.writeHead(502);
@@ -203,7 +215,7 @@ export function startCredentialProxy(
           upstream.end();
         }
 
-        sendUpstreamRequest(false);
+        sendUpstreamRequest(0, []);
       });
     });
 
