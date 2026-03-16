@@ -62,3 +62,33 @@ systemctl --user restart nanoclaw
 ## Container Build Cache
 
 The container buildkit caches the build context aggressively. `--no-cache` alone does NOT invalidate COPY steps — the builder's volume retains stale files. To force a truly clean rebuild, prune the builder then re-run `./container/build.sh`.
+
+## IPC Reverse Communication
+
+Host-side Claude Code instances can send messages back to Feishu by writing JSON files to the IPC messages directory. NanoClaw's IPC watcher picks them up automatically.
+
+**Path:** `data/ipc/{group}/messages/msg-{timestamp}.json`
+
+**Format:**
+```json
+{
+  "type": "message",
+  "chatJid": "oc_xxx@feishu",
+  "text": "Your message here"
+}
+```
+
+- `type` must be `"message"`
+- `chatJid` is the Feishu group JID (find it in `groups/{name}/` config)
+- Non-main groups can only send to their own `chatJid`
+- Files are deleted after processing
+
+**Note:** The IPC directory is relative to the NanoClaw project root, not the group folder. Host Claude Code processes run with `cwd` set to the group folder, so use the absolute project root path.
+
+**Example (Bash — from any working directory):**
+```bash
+NANOCLAW_ROOT="/home/dell/nanoclaw"
+IPC_DIR="$NANOCLAW_ROOT/data/ipc/main/messages"
+mkdir -p "$IPC_DIR"
+echo '{"type":"message","chatJid":"oc_xxx@feishu","text":"Hello from host!"}' > "$IPC_DIR/msg-$(date +%s).json"
+```
