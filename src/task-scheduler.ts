@@ -184,7 +184,7 @@ async function runTask(
           ? deps.getHostSessions?.()[task.group_folder]
           : undefined;
 
-      await runHostAgent(
+      const hostOutput = await runHostAgent(
         group,
         {
           prompt: task.prompt,
@@ -203,17 +203,21 @@ async function runTask(
           if (hostOutput.result) {
             result = hostOutput.result;
             await deps.sendMessage(task.chat_jid, hostOutput.result);
-            scheduleClose();
           }
           if (hostOutput.status === 'success') {
             deps.queue.notifyIdle(task.chat_jid, 'task');
-            scheduleClose();
           }
           if (hostOutput.status === 'error') {
             error = hostOutput.error || 'Unknown error';
           }
         },
       );
+
+      if (hostOutput.status === 'error') {
+        error = hostOutput.error || 'Unknown error';
+      } else if (hostOutput.result) {
+        result = hostOutput.result;
+      }
     } else {
       const output = await runContainerAgent(
         group,
