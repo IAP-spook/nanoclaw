@@ -87,7 +87,7 @@ Container writes JSON files to `/workspace/ipc/host-exec/` (mapped to `data/ipc/
 }
 ```
 
-**Sync request:** Same as run with `"background": false`. Host writes result back to `data/host-tasks/{group}/{task_id}/` and container polls for completion.
+**Sync request:** Same as run with `"background": false`. Host executor creates `data/host-tasks/{group}/{task_id}/` and writes `status: running` before spawning. Container MCP tool polls `/workspace/host-tasks/{task_id}/status` every 200ms. Returns when status reads `completed` or `failed`, or after 30s timeout (returns timeout error). Linux bind mounts ensure container reads see host writes immediately.
 
 File naming follows existing convention: `{Date.now()}-{random}.json` with atomic temp→rename writes.
 
@@ -114,7 +114,7 @@ New module. Single responsibility: spawn processes and manage output.
 
 ### IPC Watcher Changes (`src/ipc.ts`)
 
-Add `host-exec/` to the per-group directory scan:
+Add `host-exec/` to the per-group directory scan. The `host-exec/` directory is pre-created during container setup in `container-runner.ts`, following the same pattern as `messages/`, `tasks/`, and `input/`:
 
 ```typescript
 // existing:
@@ -141,7 +141,7 @@ This allows `host_task_status` to read task output directly without IPC round-tr
 NANOCLAW_HOST_GROUP_PATH=/home/dell/nanoclaw/groups/{folder}
 ```
 
-Used as default `working_dir` so agent can use relative paths in commands.
+Read by `host_exec` tool handler as default `working_dir`, so agent can use relative paths in commands.
 
 ### Task Storage
 
