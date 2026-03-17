@@ -27,6 +27,7 @@ Execute a shell command on the host machine.
   }
 }
 // background=false → { exit_code, stdout, stderr }
+// background=false (timeout) → { error: "timeout", task_id } (process keeps running, agent can follow up)
 // background=true  → { task_id }
 ```
 
@@ -73,9 +74,11 @@ Container writes JSON files to `/workspace/ipc/host-exec/` (mapped to `data/ipc/
 {
   "type": "host_exec",
   "task_id": "20260317-143022-abc1",
+  "groupFolder": "ml-lab",
   "command": "python train.py --epochs 100",
   "working_dir": "/home/dell/nanoclaw/groups/ml-lab",
-  "background": true
+  "background": true,
+  "timestamp": 1710680000000
 }
 ```
 
@@ -83,11 +86,19 @@ Container writes JSON files to `/workspace/ipc/host-exec/` (mapped to `data/ipc/
 ```json
 {
   "type": "host_kill",
-  "task_id": "20260317-143022-abc1"
+  "task_id": "20260317-143022-abc1",
+  "groupFolder": "ml-lab",
+  "timestamp": 1710680010000
 }
 ```
 
-**Sync request:** Same as run with `"background": false`. Host executor creates `data/host-tasks/{group}/{task_id}/` and writes `status: running` before spawning. Container MCP tool polls `/workspace/host-tasks/{task_id}/status` every 200ms. Returns when status reads `completed` or `failed`, or after 30s timeout (returns timeout error). Linux bind mounts ensure container reads see host writes immediately.
+**Sync request:** Same as run with `"background": false`. Host executor creates `data/host-tasks/{group}/{task_id}/` and writes `status: running` before spawning. Container MCP tool polls `/workspace/host-tasks/{task_id}/status` every 200ms:
+- File not found → treat as `pending` (host hasn't processed the IPC file yet, ~1s delay)
+- `running` → keep polling
+- `completed` or `failed` → read stdout.log/stderr.log, return result
+- 30s elapsed with no completion → return timeout error, process keeps running in background
+
+Linux bind mounts ensure container reads see host writes immediately.
 
 File naming follows existing convention: `{Date.now()}-{random}.json` with atomic temp→rename writes.
 
@@ -95,22 +106,26 @@ File naming follows existing convention: `{Date.now()}-{random}.json` with atomi
 
 New module. Single responsibility: spawn processes and manage output.
 
-**Sync execution:**
-- `child_process.spawn(command, { shell: true, cwd })`
-- Collect stdout/stderr in memory
-- Return after exit or 30s timeout (SIGTERM on timeout)
+**Both sync and async use the same storage structure.** Every task creates `data/host-tasks/{group}/{task_id}/` with meta.json, stdout.log, stderr.log, and status file. The only difference is on the container MCP tool side: sync blocks and polls, async returns immediately.
 
-**Async execution:**
+**Execution (sync and async):**
 - `child_process.spawn(command, { shell: true, cwd })`
-- Pipe stdout/stderr to `data/host-tasks/{group}/{task_id}/stdout.log` and `stderr.log` via append streams
 - Write `meta.json` with command, pid, started_at
-- Write `status` file: `running` → `completed`/`failed` on exit
-- On exit: update `meta.json` with exit_code, finished_at
+- Write `status` file: `running`
+- Pipe stdout/stderr to `stdout.log` and `stderr.log` via append streams
+- On exit: write exit_code and finished_at to `meta.json`, update `status` to `completed` or `failed`
 
 **Kill:**
+- Verify authorization: `isMain || taskGroup === sourceGroup` (same pattern as existing task operations in ipc.ts)
 - Look up ChildProcess from in-memory map by task_id
 - `process.kill(pid, 'SIGTERM')`
 - Update status to `killed`
+
+**Restart recovery:**
+- On NanoClaw startup, scan `data/host-tasks/{group}/{task_id}/` for tasks with `status: running`
+- Read pid from `meta.json`, check `/proc/{pid}` existence and verify start time from `/proc/{pid}/stat` matches `started_at` (prevents pid recycling false positives)
+- If alive and verified: re-add to in-memory map (cannot re-attach stdout pipe, but can still kill)
+- If dead or pid recycled: update status to `failed`, write finished_at
 
 ### IPC Watcher Changes (`src/ipc.ts`)
 
@@ -135,6 +150,14 @@ data/host-tasks/{group}/ → /workspace/host-tasks/ (readonly)
 ```
 
 This allows `host_task_status` to read task output directly without IPC round-trip.
+
+**Pre-create host-tasks directory** in `buildVolumeMounts()` before mounting, following the same pattern as IPC directories (line 168-171):
+```typescript
+const hostTasksDir = path.join(DATA_DIR, 'host-tasks', group.folder);
+fs.mkdirSync(hostTasksDir, { recursive: true });
+```
+
+This prevents Docker from creating it as root-owned when the directory doesn't exist.
 
 **New environment variable** passed to MCP server:
 ```
