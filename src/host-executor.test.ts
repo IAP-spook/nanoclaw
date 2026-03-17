@@ -112,4 +112,49 @@ describe('HostExecutor', () => {
       expect(stderr.trim()).toBe('err');
     });
   });
+
+  describe('recover', () => {
+    it('marks dead tasks as failed on recovery', () => {
+      const taskDir = path.join(tmpDir, 'main', 'test-recover-001');
+      fs.mkdirSync(taskDir, { recursive: true });
+      fs.writeFileSync(path.join(taskDir, 'status'), 'running');
+      fs.writeFileSync(
+        path.join(taskDir, 'meta.json'),
+        JSON.stringify({
+          command: 'sleep 999',
+          pid: 999999,
+          started_at: '2026-01-01T00:00:00Z',
+        }),
+      );
+
+      executor.recover();
+
+      const status = fs
+        .readFileSync(path.join(taskDir, 'status'), 'utf-8')
+        .trim();
+      expect(status).toBe('failed');
+
+      const meta = JSON.parse(
+        fs.readFileSync(path.join(taskDir, 'meta.json'), 'utf-8'),
+      );
+      expect(meta.finished_at).toBeDefined();
+    });
+
+    it('leaves completed tasks untouched', () => {
+      const taskDir = path.join(tmpDir, 'main', 'test-recover-002');
+      fs.mkdirSync(taskDir, { recursive: true });
+      fs.writeFileSync(path.join(taskDir, 'status'), 'completed');
+      fs.writeFileSync(
+        path.join(taskDir, 'meta.json'),
+        JSON.stringify({ command: 'echo ok', pid: 1, exit_code: 0 }),
+      );
+
+      executor.recover();
+
+      const status = fs
+        .readFileSync(path.join(taskDir, 'status'), 'utf-8')
+        .trim();
+      expect(status).toBe('completed');
+    });
+  });
 });
