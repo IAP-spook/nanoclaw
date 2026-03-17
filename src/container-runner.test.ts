@@ -86,6 +86,7 @@ vi.mock('child_process', async () => {
   };
 });
 
+import { spawn } from 'child_process';
 import { runContainerAgent, ContainerOutput } from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
@@ -206,5 +207,54 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+});
+
+describe('container-runner mounts and env vars', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('includes host-tasks readonly mount and NANOCLAW_HOST_GROUP_PATH env var', async () => {
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      async () => {},
+    );
+
+    // Let spawn happen
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Inspect the args passed to spawn
+    const spawnMock = vi.mocked(spawn);
+    const lastCall = spawnMock.mock.calls[spawnMock.mock.calls.length - 1];
+    const args = lastCall[1] as string[];
+
+    // Verify host-tasks readonly mount exists
+    // The mount args contain the host-tasks path bound to /workspace/host-tasks
+    const hostTasksMountIdx = args.findIndex(
+      (a) => typeof a === 'string' && a.includes('/workspace/host-tasks'),
+    );
+    expect(hostTasksMountIdx).toBeGreaterThan(-1);
+
+    // Verify NANOCLAW_HOST_GROUP_PATH env var is set
+    const envIdx = args.findIndex(
+      (a) => typeof a === 'string' && a.startsWith('NANOCLAW_HOST_GROUP_PATH='),
+    );
+    expect(envIdx).toBeGreaterThan(-1);
+    expect(args[envIdx]).toContain('test-group');
+
+    // Clean up: emit output and close
+    emitOutputMarker(fakeProc, { status: 'success', result: 'ok' });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
   });
 });

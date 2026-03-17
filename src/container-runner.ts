@@ -169,6 +169,19 @@ function buildVolumeMounts(
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+
+  // Pre-create host-exec IPC subdirectory
+  fs.mkdirSync(path.join(groupIpcDir, 'host-exec'), { recursive: true });
+
+  // Host tasks output directory (readonly mount for container to read status)
+  const hostTasksDir = path.join(DATA_DIR, 'host-tasks', group.folder);
+  fs.mkdirSync(hostTasksDir, { recursive: true });
+  mounts.push({
+    hostPath: hostTasksDir,
+    containerPath: '/workspace/host-tasks',
+    readonly: true,
+  });
+
   mounts.push({
     hostPath: groupIpcDir,
     containerPath: '/workspace/ipc',
@@ -215,6 +228,7 @@ function buildVolumeMounts(
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
+  groupFolder: string,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -251,6 +265,13 @@ function buildContainerArgs(
     args.push('-e', 'HOME=/home/node');
   }
 
+  // Expose the host-side group folder path so container agents can reference it
+  // in host-exec requests (the container cannot derive this path on its own).
+  args.push(
+    '-e',
+    `NANOCLAW_HOST_GROUP_PATH=${resolveGroupFolderPath(groupFolder)}`,
+  );
+
   for (const mount of mounts) {
     if (mount.readonly) {
       args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));
@@ -278,7 +299,7 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  const containerArgs = buildContainerArgs(mounts, containerName, group.folder);
 
   logger.debug(
     {
