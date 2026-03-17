@@ -18,8 +18,6 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
-import { shouldRunOnHost, loadHostConfig } from './host-router.js';
-import { runHostAgent, HostRunnerOutput } from './host-runner.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
@@ -67,8 +65,6 @@ export function computeNextRun(task: ScheduledTask): string | null {
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
-  getHostSessions?: () => Record<string, string>;
-  setHostSession?: (groupFolder: string, sessionId: string) => void;
   queue: GroupQueue;
   onProcess: (
     groupJid: string,
@@ -158,9 +154,6 @@ async function runTask(
   const sessionId =
     task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
 
-  const hostConfig = loadHostConfig(task.group_folder);
-  const useHost = shouldRunOnHost(task.prompt, hostConfig);
-
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
   // query loop to time out. A short delay handles any final MCP calls.
@@ -171,96 +164,52 @@ async function runTask(
     if (closeTimer) return; // already scheduled
     closeTimer = setTimeout(() => {
       logger.debug({ taskId: task.id }, 'Closing task container after result');
-      if (!useHost) {
-        deps.queue.closeStdin(task.chat_jid, 'task');
-      }
+      deps.queue.closeStdin(task.chat_jid);
     }, TASK_CLOSE_DELAY_MS);
   };
 
   try {
-    if (useHost) {
-      const hostSessionId =
-        task.context_mode === 'group'
-          ? deps.getHostSessions?.()[task.group_folder]
-          : undefined;
-
-      const hostOutput = await runHostAgent(
-        group,
-        {
-          prompt: task.prompt,
-          groupFolder: task.group_folder,
-          chatJid: task.chat_jid,
-          isMain,
-          sessionId: hostSessionId,
-          isScheduledTask: true,
-        },
-        (proc, name) =>
-          deps.onProcess(task.chat_jid, proc, name, task.group_folder),
-        async (hostOutput: HostRunnerOutput) => {
-          if (hostOutput.sessionId) {
-            deps.setHostSession?.(task.group_folder, hostOutput.sessionId);
-          }
-          if (hostOutput.result) {
-            result = hostOutput.result;
-            await deps.sendMessage(task.chat_jid, hostOutput.result);
-          }
-          if (hostOutput.status === 'success') {
-            deps.queue.notifyIdle(task.chat_jid, 'task');
-          }
-          if (hostOutput.status === 'error') {
-            error = hostOutput.error || 'Unknown error';
-          }
-        },
-      );
-
-      if (hostOutput.status === 'error') {
-        error = hostOutput.error || 'Unknown error';
-      } else if (hostOutput.result) {
-        result = hostOutput.result;
-      }
-    } else {
-      const output = await runContainerAgent(
-        group,
-        {
-          prompt: task.prompt,
-          sessionId,
-          groupFolder: task.group_folder,
-          chatJid: task.chat_jid,
-          isMain,
-          isScheduledTask: true,
-          assistantName: ASSISTANT_NAME,
-        },
-        (proc, containerName) =>
-          deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
-        async (streamedOutput: ContainerOutput) => {
-          if (streamedOutput.result) {
-            result = streamedOutput.result;
-            await deps.sendMessage(task.chat_jid, streamedOutput.result);
-            scheduleClose();
-          }
-          if (streamedOutput.status === 'success') {
-            deps.queue.notifyIdle(task.chat_jid, 'task');
-            scheduleClose();
-          }
-          if (streamedOutput.status === 'error') {
-            error = streamedOutput.error || 'Unknown error';
-          }
-        },
-      );
-
-      if (closeTimer) clearTimeout(closeTimer);
-
-      if (output.status === 'error') {
-        error = output.error || 'Unknown error';
-      } else if (output.result) {
-        result = output.result;
-      }
-    }
+    const output = await runContainerAgent(
+      group,
+      {
+        prompt: task.prompt,
+        sessionId,
+        groupFolder: task.group_folder,
+        chatJid: task.chat_jid,
+        isMain,
+        isScheduledTask: true,
+        assistantName: ASSISTANT_NAME,
+      },
+      (proc, containerName) =>
+        deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
+      async (streamedOutput: ContainerOutput) => {
+        if (streamedOutput.result) {
+          result = streamedOutput.result;
+          // Forward result to user (sendMessage handles formatting)
+          await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          scheduleClose();
+        }
+        if (streamedOutput.status === 'success') {
+          deps.queue.notifyIdle(task.chat_jid);
+          scheduleClose(); // Close promptly even when result is null (e.g. IPC-only tasks)
+        }
+        if (streamedOutput.status === 'error') {
+          error = streamedOutput.error || 'Unknown error';
+        }
+      },
+    );
 
     if (closeTimer) clearTimeout(closeTimer);
 
+    if (output.status === 'error') {
+      error = output.error || 'Unknown error';
+    } else if (output.result) {
+      // Result was already forwarded to the user via the streaming callback above
+      result = output.result;
+    }
+
     logger.info(
-      { taskId: task.id, durationMs: Date.now() - startTime, useHost },
+      { taskId: task.id, durationMs: Date.now() - startTime },
       'Task completed',
     );
   } catch (err) {

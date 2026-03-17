@@ -542,39 +542,3 @@ export async function processTaskIpc(
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
 }
-
-const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-
-/**
- * Delete IPC error files older than 7 days.
- * Called at startup and periodically thereafter.
- */
-export function cleanupIpcErrors(): void {
-  const errorsDir = path.join(DATA_DIR, 'ipc', 'errors');
-  try {
-    if (!fs.existsSync(errorsDir)) return;
-
-    const now = Date.now();
-    const files = fs.readdirSync(errorsDir);
-    let deleted = 0;
-
-    for (const file of files) {
-      const filePath = path.join(errorsDir, file);
-      try {
-        const stat = fs.statSync(filePath);
-        if (now - stat.mtime.getTime() > SEVEN_DAYS_MS) {
-          fs.unlinkSync(filePath);
-          deleted++;
-        }
-      } catch (err) {
-        logger.warn({ file, err }, 'Error cleaning up IPC error file');
-      }
-    }
-
-    if (deleted > 0) {
-      logger.info({ deleted }, 'Cleaned up old IPC error files');
-    }
-  } catch (err) {
-    logger.error({ err }, 'Error during IPC error cleanup');
-  }
-}

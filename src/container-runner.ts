@@ -22,13 +22,12 @@ import {
   CONTAINER_HOST_GATEWAY,
   CONTAINER_RUNTIME_BIN,
   hostGatewayArgs,
-  isGpuAvailable,
   readonlyMountArgs,
   stopContainer,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { validateAdditionalMounts } from './mount-security.js';
-import { ContainerConfig, RegisteredGroup } from './types.js';
+import { RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -60,7 +59,6 @@ interface VolumeMount {
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
-  isScheduledTask = false,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
@@ -177,20 +175,6 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // For scheduled task containers, shadow the input dir with task-input/
-  // so _close sentinel files don't conflict with parallel message containers.
-  // The agent-runner inside the container still watches /workspace/ipc/input/_close
-  // but the host-side path differs per slot type.
-  if (isScheduledTask) {
-    const taskInputDir = path.join(groupIpcDir, 'task-input');
-    fs.mkdirSync(taskInputDir, { recursive: true });
-    mounts.push({
-      hostPath: taskInputDir,
-      containerPath: '/workspace/ipc/input',
-      readonly: false,
-    });
-  }
-
   // Copy agent-runner source into a per-group writable location so agents
   // can customize it (add tools, change behavior) without affecting other
   // groups. Recompiled on container startup via entrypoint.sh.
@@ -231,7 +215,6 @@ function buildVolumeMounts(
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
-  containerConfig?: ContainerConfig,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -276,14 +259,6 @@ function buildContainerArgs(
     }
   }
 
-  // GPU passthrough
-  if (containerConfig?.gpu && isGpuAvailable()) {
-    args.push('--gpus', 'all');
-    args.push('-e', 'NVIDIA_DRIVER_CAPABILITIES=compute,utility');
-  } else if (containerConfig?.gpu) {
-    logger.warn({ containerName }, 'GPU requested but not available');
-  }
-
   args.push(CONTAINER_IMAGE);
 
   return args;
@@ -300,14 +275,10 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain, input.isScheduledTask);
+  const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(
-    mounts,
-    containerName,
-    group.containerConfig,
-  );
+  const containerArgs = buildContainerArgs(mounts, containerName);
 
   logger.debug(
     {
