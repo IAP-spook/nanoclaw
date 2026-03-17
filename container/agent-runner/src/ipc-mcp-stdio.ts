@@ -512,6 +512,158 @@ server.tool(
   },
 );
 
+// ---------------------------------------------------------------------------
+// Host terminal tools — execute commands on the host machine
+// ---------------------------------------------------------------------------
+
+const HOST_EXEC_DIR = path.join(IPC_DIR, 'host-exec');
+const HOST_TASKS_DIR = '/workspace/host-tasks';
+const hostGroupPath = process.env.NANOCLAW_HOST_GROUP_PATH || '/workspace/group';
+
+server.tool(
+  'host_exec',
+  `Execute a shell command on the HOST machine (outside the container). Use for tasks needing GPU, conda environments, host filesystem access, or long-running processes.
+
+IMPORTANT: You must obtain explicit user authorization before using this tool. Explain what you need to do and ask permission. Operate only within the granted scope.
+
+Modes:
+• background=false (default): Blocks up to 30s, returns stdout/stderr directly. Use for quick commands.
+• background=true: Returns task_id immediately. Use host_task_status to check progress later.
+
+If a sync command times out at 30s, the process keeps running. You'll get a task_id to follow up.`,
+  {
+    command: z.string().describe('Shell command to execute on the host'),
+    working_dir: z.string().optional().describe('Working directory (default: group directory on host)'),
+    background: z.boolean().optional().describe('true=async (returns task_id), false=sync (waits up to 30s)'),
+  },
+  async (args) => {
+    const taskId = `host-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const background = args.background ?? false;
+
+    writeIpcFile(HOST_EXEC_DIR, {
+      type: 'host_exec',
+      task_id: taskId,
+      groupFolder,
+      command: args.command,
+      working_dir: args.working_dir || hostGroupPath,
+      background,
+      timestamp: Date.now(),
+    });
+
+    if (background) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ task_id: taskId }) }],
+      };
+    }
+
+    // Sync mode: poll for completion
+    const statusFile = path.join(HOST_TASKS_DIR, taskId, 'status');
+    const timeout = 30_000;
+    const pollInterval = 200;
+    const start = Date.now();
+
+    while (Date.now() - start < timeout) {
+      await new Promise((r) => setTimeout(r, pollInterval));
+
+      try {
+        if (!fs.existsSync(statusFile)) continue; // pending
+        const status = fs.readFileSync(statusFile, 'utf-8').trim();
+        if (status === 'running') continue;
+
+        // completed or failed
+        const taskDir = path.join(HOST_TASKS_DIR, taskId);
+        const stdout = fs.existsSync(path.join(taskDir, 'stdout.log'))
+          ? fs.readFileSync(path.join(taskDir, 'stdout.log'), 'utf-8')
+          : '';
+        const stderr = fs.existsSync(path.join(taskDir, 'stderr.log'))
+          ? fs.readFileSync(path.join(taskDir, 'stderr.log'), 'utf-8')
+          : '';
+        const meta = JSON.parse(fs.readFileSync(path.join(taskDir, 'meta.json'), 'utf-8'));
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ exit_code: meta.exit_code, stdout, stderr }),
+          }],
+        };
+      } catch { /* retry */ }
+    }
+
+    // Timeout
+    return {
+      content: [{
+        type: 'text' as const,
+        text: JSON.stringify({ error: 'timeout', task_id: taskId }),
+      }],
+    };
+  },
+);
+
+server.tool(
+  'host_task_status',
+  'Check status and output of a host task started with host_exec(background=true).',
+  {
+    task_id: z.string().describe('The task ID returned by host_exec'),
+    tail: z.number().optional().describe('Lines from end of output (default 50, -1 for all)'),
+  },
+  async (args) => {
+    const taskDir = path.join(HOST_TASKS_DIR, args.task_id);
+
+    if (!fs.existsSync(taskDir)) {
+      return { content: [{ type: 'text' as const, text: `Task ${args.task_id} not found.` }], isError: true };
+    }
+
+    const status = fs.existsSync(path.join(taskDir, 'status'))
+      ? fs.readFileSync(path.join(taskDir, 'status'), 'utf-8').trim()
+      : 'unknown';
+
+    let meta: Record<string, unknown> = {};
+    try {
+      meta = JSON.parse(fs.readFileSync(path.join(taskDir, 'meta.json'), 'utf-8'));
+    } catch { /* best effort */ }
+
+    const tailN = args.tail ?? 50;
+
+    const readTail = (file: string): string => {
+      const fullPath = path.join(taskDir, file);
+      if (!fs.existsSync(fullPath)) return '';
+      const content = fs.readFileSync(fullPath, 'utf-8');
+      if (tailN === -1) return content;
+      const lines = content.split('\n');
+      return lines.slice(-tailN).join('\n');
+    };
+
+    const result = {
+      status,
+      exit_code: meta.exit_code ?? null,
+      stdout_tail: readTail('stdout.log'),
+      stderr_tail: readTail('stderr.log'),
+      started_at: meta.started_at || null,
+      finished_at: meta.finished_at || null,
+    };
+
+    return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+  },
+);
+
+server.tool(
+  'host_task_kill',
+  'Terminate a running host task.',
+  {
+    task_id: z.string().describe('The task ID to kill'),
+  },
+  async (args) => {
+    writeIpcFile(HOST_EXEC_DIR, {
+      type: 'host_kill',
+      task_id: args.task_id,
+      groupFolder,
+      timestamp: Date.now(),
+    });
+
+    return { content: [{ type: 'text' as const, text: `Kill requested for task ${args.task_id}.` }] };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);
