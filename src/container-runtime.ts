@@ -100,6 +100,28 @@ export function ensureContainerRuntimeRunning(): void {
   }
 }
 
+/** Check whether the host has a GPU accessible via NVIDIA Container Toolkit. */
+let gpuAvailable: boolean | null = null;
+
+export function isGpuAvailable(): boolean {
+  if (gpuAvailable !== null) return gpuAvailable;
+  try {
+    execSync('nvidia-smi --query-gpu=name --format=csv,noheader', {
+      timeout: 5000,
+      stdio: 'pipe',
+    });
+    gpuAvailable = true;
+  } catch {
+    gpuAvailable = false;
+  }
+  return gpuAvailable;
+}
+
+/** Reset GPU detection cache (for testing). */
+export function resetGpuCache(): void {
+  gpuAvailable = null;
+}
+
 /** Kill orphaned NanoClaw containers from previous runs. */
 export function cleanupOrphans(): void {
   try {

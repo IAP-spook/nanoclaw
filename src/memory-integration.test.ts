@@ -58,9 +58,7 @@ beforeEach(async () => {
 
   const handler = createMemoryHandler(db, groupsDir);
   server = http.createServer(handler);
-  await new Promise<void>((resolve) =>
-    server.listen(0, '127.0.0.1', resolve),
-  );
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
   baseUrl = `http://127.0.0.1:${port}`;
 });
@@ -76,7 +74,8 @@ describe('full roundtrip: API → DB → files → search', () => {
     const { status, data } = await request('POST', '/memory/save', {
       group_folder: 'main',
       title: 'Feishu Image Key',
-      content: 'The image_key has two formats: data.image_key or root image_key.',
+      content:
+        'The image_key has two formats: data.image_key or root image_key.',
       tags: ['feishu', 'api'],
       source: 'manual',
     });
@@ -85,7 +84,12 @@ describe('full roundtrip: API → DB → files → search', () => {
     expect(data.id).toBeGreaterThan(0);
 
     // Verify markdown file
-    const mdPath = path.join(groupsDir, 'main', 'memory', 'feishu-image-key.md');
+    const mdPath = path.join(
+      groupsDir,
+      'main',
+      'memory',
+      'feishu-image-key.md',
+    );
     expect(fs.existsSync(mdPath)).toBe(true);
     const md = fs.readFileSync(mdPath, 'utf-8');
     expect(md).toContain('title: Feishu Image Key');

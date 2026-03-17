@@ -46,7 +46,9 @@ function createFakeProcess() {
   proc.stdin = new PassThrough();
   proc.stdout = new PassThrough();
   proc.stderr = new PassThrough();
-  proc.kill = vi.fn(() => { proc.killed = true; });
+  proc.kill = vi.fn(() => {
+    proc.killed = true;
+  });
   proc.pid = 54321;
   proc.killed = false;
   return proc;
@@ -55,7 +57,8 @@ function createFakeProcess() {
 let fakeProc: ReturnType<typeof createFakeProcess>;
 
 vi.mock('child_process', async () => {
-  const actual = await vi.importActual<typeof import('child_process')>('child_process');
+  const actual =
+    await vi.importActual<typeof import('child_process')>('child_process');
   return {
     ...actual,
     spawn: vi.fn(() => fakeProc),
@@ -63,7 +66,11 @@ vi.mock('child_process', async () => {
   };
 });
 
-import { runHostAgent, validateClaudeCli, HostRunnerOutput } from './host-runner.js';
+import {
+  runHostAgent,
+  validateClaudeCli,
+  HostRunnerOutput,
+} from './host-runner.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -97,7 +104,9 @@ describe('host-runner', () => {
 
     it('returns false when claude is not available', async () => {
       const { execSync } = await import('child_process');
-      (execSync as any).mockImplementationOnce(() => { throw new Error('not found'); });
+      (execSync as any).mockImplementationOnce(() => {
+        throw new Error('not found');
+      });
       expect(validateClaudeCli()).toBe(false);
     });
   });
@@ -122,13 +131,18 @@ describe('host-runner', () => {
       expect(args).not.toContain('--resume');
       expect(opts.cwd).toContain('test-group');
 
-      expect(onProcess).toHaveBeenCalledWith(fakeProc, expect.stringContaining('host-test-group'));
+      expect(onProcess).toHaveBeenCalledWith(
+        fakeProc,
+        expect.stringContaining('host-test-group'),
+      );
 
-      fakeProc.stdout.push(JSON.stringify({
-        type: 'result',
-        result: '模型训练完成',
-        session_id: 'sess-abc-123',
-      }) + '\n');
+      fakeProc.stdout.push(
+        JSON.stringify({
+          type: 'result',
+          result: '模型训练完成',
+          session_id: 'sess-abc-123',
+        }) + '\n',
+      );
       fakeProc.emit('close', 0);
 
       await vi.advanceTimersByTimeAsync(10);
@@ -153,7 +167,13 @@ describe('host-runner', () => {
       expect(args).toContain('--resume');
       expect(args).toContain('existing-session');
 
-      fakeProc.stdout.push(JSON.stringify({ type: 'result', result: 'done', session_id: 'existing-session' }) + '\n');
+      fakeProc.stdout.push(
+        JSON.stringify({
+          type: 'result',
+          result: 'done',
+          session_id: 'existing-session',
+        }) + '\n',
+      );
       fakeProc.emit('close', 0);
       await vi.advanceTimersByTimeAsync(10);
       await resultPromise;
@@ -174,24 +194,33 @@ describe('host-runner', () => {
 
     it('calls onOutput callback with parsed result', async () => {
       const onOutput = vi.fn(async () => {});
-      const resultPromise = runHostAgent(testGroup, testInput, vi.fn(), onOutput);
+      const resultPromise = runHostAgent(
+        testGroup,
+        testInput,
+        vi.fn(),
+        onOutput,
+      );
 
       await vi.advanceTimersByTimeAsync(10);
 
-      fakeProc.stdout.push(JSON.stringify({
-        type: 'result',
-        result: 'Training complete',
-        session_id: 'sess-1',
-      }) + '\n');
+      fakeProc.stdout.push(
+        JSON.stringify({
+          type: 'result',
+          result: 'Training complete',
+          session_id: 'sess-1',
+        }) + '\n',
+      );
       fakeProc.emit('close', 0);
       await vi.advanceTimersByTimeAsync(10);
 
       const result = await resultPromise;
-      expect(onOutput).toHaveBeenCalledWith(expect.objectContaining({
-        status: 'success',
-        result: 'Training complete',
-        sessionId: 'sess-1',
-      }));
+      expect(onOutput).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: 'success',
+          result: 'Training complete',
+          sessionId: 'sess-1',
+        }),
+      );
       expect(result.status).toBe('success');
     });
 
@@ -226,12 +255,30 @@ describe('host-runner', () => {
 
     it('ignores non-result stream-json lines', async () => {
       const onOutput = vi.fn(async () => {});
-      const resultPromise = runHostAgent(testGroup, testInput, vi.fn(), onOutput);
+      const resultPromise = runHostAgent(
+        testGroup,
+        testInput,
+        vi.fn(),
+        onOutput,
+      );
       await vi.advanceTimersByTimeAsync(10);
 
-      fakeProc.stdout.push(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'thinking...' }] } }) + '\n');
-      fakeProc.stdout.push(JSON.stringify({ type: 'content_block_start' }) + '\n');
-      fakeProc.stdout.push(JSON.stringify({ type: 'result', result: 'Final answer', session_id: 'sess-2' }) + '\n');
+      fakeProc.stdout.push(
+        JSON.stringify({
+          type: 'assistant',
+          message: { content: [{ type: 'text', text: 'thinking...' }] },
+        }) + '\n',
+      );
+      fakeProc.stdout.push(
+        JSON.stringify({ type: 'content_block_start' }) + '\n',
+      );
+      fakeProc.stdout.push(
+        JSON.stringify({
+          type: 'result',
+          result: 'Final answer',
+          session_id: 'sess-2',
+        }) + '\n',
+      );
       fakeProc.emit('close', 0);
       await vi.advanceTimersByTimeAsync(10);
 

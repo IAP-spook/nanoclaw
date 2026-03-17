@@ -54,9 +54,7 @@ beforeEach(async () => {
 
   const handler = createMemoryHandler(db);
   server = http.createServer(handler);
-  await new Promise<void>((resolve) =>
-    server.listen(0, '127.0.0.1', resolve),
-  );
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   port = (server.address() as AddressInfo).port;
 });
 
@@ -96,9 +94,7 @@ describe('POST /memory/save', () => {
 
     // Verify only one entry exists
     const list = await request('GET', '/memory/list?group_folder=main');
-    const entries = list.body.filter(
-      (e: any) => e.title === 'Upsert test',
-    );
+    const entries = list.body.filter((e: any) => e.title === 'Upsert test');
     expect(entries.length).toBe(1);
     expect(entries[0].tags).toEqual(['updated']);
   });
@@ -247,10 +243,7 @@ describe('GET /memory/list', () => {
   });
 
   it('filters by tags via query param', async () => {
-    const res = await request(
-      'GET',
-      '/memory/list?group_folder=main&tags=a',
-    );
+    const res = await request('GET', '/memory/list?group_folder=main&tags=a');
     expect(res.body.length).toBe(1);
     expect(res.body[0].title).toBe('Entry 1');
   });
@@ -284,10 +277,7 @@ describe('DELETE /memory/:id', () => {
   });
 
   it('returns 404 for non-existent entry', async () => {
-    const res = await request(
-      'DELETE',
-      '/memory/99999?group_folder=main',
-    );
+    const res = await request('DELETE', '/memory/99999?group_folder=main');
     expect(res.status).toBe(404);
   });
 
@@ -302,10 +292,7 @@ describe('DELETE /memory/:id', () => {
       .prepare("SELECT id FROM memory_entries WHERE title = 'Not yours'")
       .get() as { id: number };
 
-    const res = await request(
-      'DELETE',
-      `/memory/${row.id}?group_folder=main`,
-    );
+    const res = await request('DELETE', `/memory/${row.id}?group_folder=main`);
     expect(res.status).toBe(403);
   });
 

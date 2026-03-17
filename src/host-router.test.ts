@@ -1,9 +1,24 @@
 import { describe, it, expect } from 'vitest';
-import { shouldRunOnHost, loadHostConfig, HostRouteConfig } from './host-router.js';
+import {
+  shouldRunOnHost,
+  loadHostConfig,
+  HostRouteConfig,
+} from './host-router.js';
 
 const defaultConfig: HostRouteConfig = {
   enabled: true,
-  keywords: ['训练', 'train', 'conda', 'GPU', '模型', 'model', 'python', '系统', 'pip', 'pytorch'],
+  keywords: [
+    '训练',
+    'train',
+    'conda',
+    'GPU',
+    '模型',
+    'model',
+    'python',
+    '系统',
+    'pip',
+    'pytorch',
+  ],
   forceHostPrefix: '在主机上',
   forceContainerPrefix: '用容器',
 };
@@ -16,11 +31,15 @@ describe('host-router', () => {
     });
 
     it('returns false for prompts without keywords', () => {
-      expect(shouldRunOnHost('你好，今天天气怎么样', defaultConfig)).toBe(false);
+      expect(shouldRunOnHost('你好，今天天气怎么样', defaultConfig)).toBe(
+        false,
+      );
     });
 
     it('returns true when prompt contains a keyword', () => {
-      expect(shouldRunOnHost('请帮我训练一下这个模型', defaultConfig)).toBe(true);
+      expect(shouldRunOnHost('请帮我训练一下这个模型', defaultConfig)).toBe(
+        true,
+      );
     });
 
     it('keyword matching is case-insensitive', () => {
@@ -36,7 +55,9 @@ describe('host-router', () => {
     });
 
     it('forceContainerPrefix takes priority over forceHostPrefix', () => {
-      expect(shouldRunOnHost('用容器 在主机上 训练', defaultConfig)).toBe(false);
+      expect(shouldRunOnHost('用容器 在主机上 训练', defaultConfig)).toBe(
+        false,
+      );
     });
 
     it('returns false with empty keywords list', () => {

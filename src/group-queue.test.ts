@@ -412,7 +412,10 @@ describe('GroupQueue', () => {
 
     const processMessages = vi.fn(async () => {
       concurrentMessages++;
-      maxConcurrentMessages = Math.max(maxConcurrentMessages, concurrentMessages);
+      maxConcurrentMessages = Math.max(
+        maxConcurrentMessages,
+        concurrentMessages,
+      );
       await new Promise<void>((resolve) => completionCallbacks.push(resolve));
       concurrentMessages--;
       return true;
@@ -525,7 +528,13 @@ describe('GroupQueue', () => {
     queue.setProcessMessagesFn(processMessages);
     queue.enqueueMessageCheck('group1@g.us');
     await vi.advanceTimersByTimeAsync(10);
-    queue.registerProcess('group1@g.us', {} as any, 'container-1', 'test-group', 'message');
+    queue.registerProcess(
+      'group1@g.us',
+      {} as any,
+      'container-1',
+      'test-group',
+      'message',
+    );
 
     const writeFileSync = vi.mocked(fs.default.writeFileSync);
     writeFileSync.mockClear();
@@ -555,7 +564,13 @@ describe('GroupQueue', () => {
 
     queue.enqueueTask('group1@g.us', 'task-1', taskFn);
     await vi.advanceTimersByTimeAsync(10);
-    queue.registerProcess('group1@g.us', {} as any, 'container-1', 'test-group', 'task');
+    queue.registerProcess(
+      'group1@g.us',
+      {} as any,
+      'container-1',
+      'test-group',
+      'task',
+    );
 
     const writeFileSync = vi.mocked(fs.default.writeFileSync);
     writeFileSync.mockClear();
@@ -632,7 +647,13 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(10);
 
     const mockMessageProc = { killed: false } as any;
-    queue.registerProcess('group1@g.us', mockMessageProc, 'msg-container', 'test-group', 'message');
+    queue.registerProcess(
+      'group1@g.us',
+      mockMessageProc,
+      'msg-container',
+      'test-group',
+      'message',
+    );
 
     // Start task container
     const taskFn = vi.fn(async () => {
@@ -644,7 +665,13 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(10);
 
     const mockTaskProc = { killed: false } as any;
-    queue.registerProcess('group1@g.us', mockTaskProc, 'task-container', 'test-group', 'task');
+    queue.registerProcess(
+      'group1@g.us',
+      mockTaskProc,
+      'task-container',
+      'test-group',
+      'task',
+    );
 
     // Shutdown should see both containers
     await queue.shutdown(1000);

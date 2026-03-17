@@ -46,7 +46,9 @@ describe('cleanupIpcErrors', () => {
     cleanupIpcErrors();
 
     expect(unlinkSpy).toHaveBeenCalledTimes(1);
-    expect(unlinkSpy).toHaveBeenCalledWith(path.join(errorsDir, 'old-error.json'));
+    expect(unlinkSpy).toHaveBeenCalledWith(
+      path.join(errorsDir, 'old-error.json'),
+    );
   });
 
   it('does nothing when errors directory does not exist', () => {
@@ -60,7 +62,9 @@ describe('cleanupIpcErrors', () => {
 
   it('handles errors gracefully', () => {
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);
-    vi.spyOn(fs, 'readdirSync').mockImplementation(() => { throw new Error('permission denied'); });
+    vi.spyOn(fs, 'readdirSync').mockImplementation(() => {
+      throw new Error('permission denied');
+    });
 
     expect(() => cleanupIpcErrors()).not.toThrow();
   });

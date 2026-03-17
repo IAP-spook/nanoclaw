@@ -22,6 +22,8 @@ import {
   stopContainer,
   ensureContainerRuntimeRunning,
   cleanupOrphans,
+  isGpuAvailable,
+  resetGpuCache,
 } from './container-runtime.js';
 import { logger } from './logger.js';
 
@@ -145,5 +147,43 @@ describe('cleanupOrphans', () => {
       { count: 2, names: ['nanoclaw-a-1', 'nanoclaw-b-2'] },
       'Stopped orphaned containers',
     );
+  });
+});
+
+// --- isGpuAvailable ---
+
+describe('isGpuAvailable', () => {
+  beforeEach(() => {
+    resetGpuCache();
+  });
+
+  it('returns true when nvidia-smi succeeds', () => {
+    mockExecSync.mockReturnValueOnce('Quadro RTX 5000\n');
+
+    expect(isGpuAvailable()).toBe(true);
+
+    expect(mockExecSync).toHaveBeenCalledWith(
+      'nvidia-smi --query-gpu=name --format=csv,noheader',
+      { timeout: 5000, stdio: 'pipe' },
+    );
+  });
+
+  it('returns false when nvidia-smi fails', () => {
+    mockExecSync.mockImplementationOnce(() => {
+      throw new Error('nvidia-smi not found');
+    });
+
+    expect(isGpuAvailable()).toBe(false);
+  });
+
+  it('caches result after first call', () => {
+    mockExecSync.mockReturnValueOnce('Quadro RTX 5000\n');
+
+    isGpuAvailable();
+    isGpuAvailable();
+    isGpuAvailable();
+
+    // nvidia-smi should only be called once
+    expect(mockExecSync).toHaveBeenCalledTimes(1);
   });
 });

@@ -13,35 +13,18 @@ export interface HostRouteConfig {
 
 const DEFAULT_CONFIG: HostRouteConfig = {
   enabled: true,
-  keywords: [
-    '训练',
-    'train',
-    'conda',
-    'GPU',
-    '模型',
-    'model',
-    'python',
-    '系统',
-    'pip',
-    'pytorch',
-  ],
+  keywords: ['训练', 'train', 'conda', 'GPU', '模型', 'model', 'python', '系统', 'pip', 'pytorch'],
   forceHostPrefix: '在主机上',
   forceContainerPrefix: '用容器',
 };
 
-export function shouldRunOnHost(
-  prompt: string,
-  config: HostRouteConfig,
-): boolean {
+export function shouldRunOnHost(prompt: string, config: HostRouteConfig): boolean {
   if (!config.enabled) return false;
 
   const trimmed = prompt.trim();
 
   // Manual override prefixes (container prefix wins if both present)
-  if (
-    config.forceContainerPrefix &&
-    trimmed.startsWith(config.forceContainerPrefix)
-  ) {
+  if (config.forceContainerPrefix && trimmed.startsWith(config.forceContainerPrefix)) {
     return false;
   }
   if (config.forceHostPrefix && trimmed.startsWith(config.forceHostPrefix)) {
@@ -62,18 +45,10 @@ export function loadHostConfig(groupFolder: string): HostRouteConfig {
       enabled: parsed.enabled ?? DEFAULT_CONFIG.enabled,
       keywords: parsed.keywords ?? DEFAULT_CONFIG.keywords,
       forceHostPrefix: parsed.forceHostPrefix ?? DEFAULT_CONFIG.forceHostPrefix,
-      forceContainerPrefix:
-        parsed.forceContainerPrefix ?? DEFAULT_CONFIG.forceContainerPrefix,
+      forceContainerPrefix: parsed.forceContainerPrefix ?? DEFAULT_CONFIG.forceContainerPrefix,
     };
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      logger.debug({ groupFolder }, 'No host-rules.json found, using defaults');
-    } else {
-      logger.warn(
-        { groupFolder, err },
-        'Failed to parse host-rules.json, using defaults',
-      );
-    }
+  } catch {
+    logger.debug({ groupFolder }, 'No host-rules.json found, using defaults');
     return { ...DEFAULT_CONFIG };
   }
 }

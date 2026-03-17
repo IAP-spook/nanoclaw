@@ -51,6 +51,9 @@ vi.mock('./mount-security.js', () => ({
   validateAdditionalMounts: vi.fn(() => []),
 }));
 
+// Control GPU detection via execSync mock (isGpuAvailable calls nvidia-smi via execSync)
+const mockExecSync = vi.fn();
+
 // Create a controllable fake ChildProcess
 function createFakeProcess() {
   const proc = new EventEmitter() as EventEmitter & {
@@ -70,13 +73,14 @@ function createFakeProcess() {
 
 let fakeProc: ReturnType<typeof createFakeProcess>;
 
-// Mock child_process.spawn
+// Mock child_process.spawn + execSync (for GPU detection in container-runtime)
 vi.mock('child_process', async () => {
   const actual =
     await vi.importActual<typeof import('child_process')>('child_process');
   return {
     ...actual,
     spawn: vi.fn(() => fakeProc),
+    execSync: (...args: unknown[]) => mockExecSync(...args),
     exec: vi.fn(
       (_cmd: string, _opts: unknown, cb?: (err: Error | null) => void) => {
         if (cb) cb(null);
@@ -87,6 +91,7 @@ vi.mock('child_process', async () => {
 });
 
 import { runContainerAgent, ContainerOutput } from './container-runner.js';
+import { resetGpuCache } from './container-runtime.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -206,5 +211,111 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+});
+
+describe('container-runner GPU passthrough', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    resetGpuCache();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('includes --gpus all when gpu: true and GPU available', async () => {
+    // Make nvidia-smi succeed so isGpuAvailable() returns true
+    mockExecSync.mockReturnValue('Quadro RTX 5000\n');
+    const { spawn } = await import('child_process');
+
+    const gpuGroup: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: { gpu: true },
+    };
+
+    const resultPromise = runContainerAgent(
+      gpuGroup,
+      testInput,
+      () => {},
+      async () => {},
+    );
+
+    // Let it start
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Check the last spawn call (previous tests may have also called spawn)
+    const spawnCalls = (spawn as any).mock.calls;
+    const spawnCall = spawnCalls[spawnCalls.length - 1];
+    const args: string[] = spawnCall[1];
+    expect(args).toContain('--gpus');
+    const gpuIdx = args.indexOf('--gpus');
+    expect(args[gpuIdx + 1]).toBe('all');
+
+    // Also check NVIDIA_DRIVER_CAPABILITIES env var
+    const envIdx = args.indexOf('NVIDIA_DRIVER_CAPABILITIES=compute,utility');
+    expect(envIdx).toBeGreaterThan(-1);
+    expect(args[envIdx - 1]).toBe('-e');
+
+    // Clean up
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+  });
+
+  it('omits --gpus when gpu: true but GPU not available', async () => {
+    // Make nvidia-smi fail so isGpuAvailable() returns false
+    mockExecSync.mockImplementation(() => {
+      throw new Error('not found');
+    });
+    const { spawn } = await import('child_process');
+
+    const gpuGroup: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: { gpu: true },
+    };
+
+    const resultPromise = runContainerAgent(
+      gpuGroup,
+      testInput,
+      () => {},
+      async () => {},
+    );
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    const spawnCalls2 = (spawn as any).mock.calls;
+    const spawnCall2 = spawnCalls2[spawnCalls2.length - 1];
+    const args2: string[] = spawnCall2[1];
+    expect(args2).not.toContain('--gpus');
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+  });
+
+  it('omits --gpus when gpu not configured', async () => {
+    // GPU available but not configured
+    mockExecSync.mockReturnValue('Quadro RTX 5000\n');
+    const { spawn } = await import('child_process');
+
+    const resultPromise = runContainerAgent(
+      testGroup, // no containerConfig.gpu
+      testInput,
+      () => {},
+      async () => {},
+    );
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    const spawnCalls3 = (spawn as any).mock.calls;
+    const spawnCall3 = spawnCalls3[spawnCalls3.length - 1];
+    const args3: string[] = spawnCall3[1];
+    expect(args3).not.toContain('--gpus');
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
   });
 });
