@@ -48,9 +48,12 @@ export async function runHostAgent(
   const processName = `host-${group.folder}-${Date.now()}`;
 
   const args = [
-    '-p', input.prompt,
+    '-p',
+    input.prompt,
     '--dangerously-skip-permissions',
-    '--output-format', 'stream-json',
+    '--output-format',
+    'stream-json',
+    '--verbose',
   ];
 
   if (input.sessionId) {
@@ -87,7 +90,10 @@ export async function runHostAgent(
 
       setTimeout(() => {
         if (!proc.killed) {
-          logger.warn({ processName }, 'SIGTERM did not stop host agent, sending SIGKILL');
+          logger.warn(
+            { processName },
+            'SIGTERM did not stop host agent, sending SIGKILL',
+          );
           proc.kill('SIGKILL');
         }
       }, 5000);
@@ -137,23 +143,29 @@ export async function runHostAgent(
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const logFile = path.join(logsDir, `host-${timestamp}.log`);
-      fs.writeFileSync(logFile, [
-        `=== Host Agent Run Log ===`,
-        `Timestamp: ${new Date().toISOString()}`,
-        `Group: ${group.name}`,
-        `Process: ${processName}`,
-        `Duration: ${duration}ms`,
-        `Exit Code: ${code}`,
-        `Timed Out: ${timedOut}`,
-        `Has Result: ${!!resultText}`,
-        `Session ID: ${sessionId || 'none'}`,
-        ``,
-        `=== Stderr ===`,
-        stderr.slice(-2000),
-      ].join('\n'));
+      fs.writeFileSync(
+        logFile,
+        [
+          `=== Host Agent Run Log ===`,
+          `Timestamp: ${new Date().toISOString()}`,
+          `Group: ${group.name}`,
+          `Process: ${processName}`,
+          `Duration: ${duration}ms`,
+          `Exit Code: ${code}`,
+          `Timed Out: ${timedOut}`,
+          `Has Result: ${!!resultText}`,
+          `Session ID: ${sessionId || 'none'}`,
+          ``,
+          `=== Stderr ===`,
+          stderr.slice(-2000),
+        ].join('\n'),
+      );
 
       if (timedOut) {
-        logger.error({ group: group.name, processName, duration }, 'Host agent timed out');
+        logger.error(
+          { group: group.name, processName, duration },
+          'Host agent timed out',
+        );
         resolve({
           status: 'error',
           result: null,
@@ -163,7 +175,10 @@ export async function runHostAgent(
       }
 
       if (code !== 0) {
-        logger.error({ group: group.name, processName, code, duration }, 'Host agent exited with error');
+        logger.error(
+          { group: group.name, processName, code, duration },
+          'Host agent exited with error',
+        );
         resolve({
           status: 'error',
           result: null,
@@ -173,7 +188,10 @@ export async function runHostAgent(
       }
 
       outputChain.then(() => {
-        logger.info({ group: group.name, processName, duration, sessionId }, 'Host agent completed');
+        logger.info(
+          { group: group.name, processName, duration, sessionId },
+          'Host agent completed',
+        );
         resolve({
           status: 'success',
           result: resultText,
@@ -184,7 +202,10 @@ export async function runHostAgent(
 
     proc.on('error', (err) => {
       clearTimeout(timeoutTimer);
-      logger.error({ group: group.name, processName, error: err }, 'Host agent spawn error');
+      logger.error(
+        { group: group.name, processName, error: err },
+        'Host agent spawn error',
+      );
       resolve({
         status: 'error',
         result: null,
