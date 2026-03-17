@@ -48,13 +48,7 @@ import { initMemorySchema } from './memory-db.js';
 import { seedMemoryEntries } from './memory-seed.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
-import { shouldRunOnHost, loadHostConfig } from './host-router.js';
-import {
-  runHostAgent,
-  validateClaudeCli,
-  HostRunnerOutput,
-} from './host-runner.js';
-import { cleanupIpcErrors, startIpcWatcher } from './ipc.js';
+import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   isSenderAllowed,
@@ -71,7 +65,6 @@ export { escapeXml, formatMessages } from './router.js';
 
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
-let hostSessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
@@ -305,15 +298,7 @@ async function runAgent(
     new Set(Object.keys(registeredGroups)),
   );
 
-  // Check if this prompt should run on host
-  const hostConfig = loadHostConfig(group.folder);
-  const useHost = shouldRunOnHost(prompt, hostConfig);
-
-  if (useHost) {
-    return runAgentOnHost(group, prompt, chatJid, isMain, onOutput);
-  }
-
-  // Container path (existing behavior)
+  // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
@@ -362,65 +347,6 @@ async function runAgent(
     return 'success';
   } catch (err) {
     logger.error({ group: group.name, err }, 'Agent error');
-    return 'error';
-  }
-}
-
-async function runAgentOnHost(
-  group: RegisteredGroup,
-  prompt: string,
-  chatJid: string,
-  isMain: boolean,
-  onOutput?: (output: ContainerOutput) => Promise<void>,
-): Promise<'success' | 'error'> {
-  const hostSessionId = hostSessions[group.folder];
-
-  // Wrap onOutput to bridge HostRunnerOutput → ContainerOutput
-  const wrappedOnOutput = onOutput
-    ? async (hostOutput: HostRunnerOutput) => {
-        if (hostOutput.sessionId) {
-          hostSessions[group.folder] = hostOutput.sessionId;
-        }
-        // Bridge to ContainerOutput format
-        await onOutput({
-          status: hostOutput.status,
-          result: hostOutput.result,
-          newSessionId: hostOutput.sessionId,
-          error: hostOutput.error,
-        });
-      }
-    : undefined;
-
-  try {
-    const output = await runHostAgent(
-      group,
-      {
-        prompt,
-        groupFolder: group.folder,
-        chatJid,
-        isMain,
-        sessionId: hostSessionId,
-      },
-      (proc, name) =>
-        queue.registerProcess(chatJid, proc, name, group.folder, 'message'),
-      wrappedOnOutput,
-    );
-
-    if (output.sessionId) {
-      hostSessions[group.folder] = output.sessionId;
-    }
-
-    if (output.status === 'error') {
-      logger.error(
-        { group: group.name, error: output.error },
-        'Host agent error',
-      );
-      return 'error';
-    }
-
-    return 'success';
-  } catch (err) {
-    logger.error({ group: group.name, err }, 'Host agent error');
     return 'error';
   }
 }
@@ -557,13 +483,6 @@ async function main(): Promise<void> {
   logger.info('Database initialized');
   loadState();
 
-  // Validate claude CLI availability for host execution
-  validateClaudeCli();
-
-  // Clean up old IPC error files (7-day retention)
-  cleanupIpcErrors();
-  setInterval(cleanupIpcErrors, 24 * 60 * 60 * 1000); // Daily cleanup
-
   // Start credential proxy (containers route API calls through this)
   const proxyServer = await startCredentialProxy(
     CREDENTIAL_PROXY_PORT,
@@ -639,10 +558,6 @@ async function main(): Promise<void> {
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
-    getHostSessions: () => hostSessions,
-    setHostSession: (groupFolder, sessionId) => {
-      hostSessions[groupFolder] = sessionId;
-    },
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder, 'task'),
