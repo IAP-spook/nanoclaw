@@ -38,10 +38,14 @@ describe('HostExecutor', () => {
       const taskDir = path.join(tmpDir, group, taskId);
       expect(fs.existsSync(taskDir)).toBe(true);
 
-      const status = fs.readFileSync(path.join(taskDir, 'status'), 'utf-8').trim();
+      const status = fs
+        .readFileSync(path.join(taskDir, 'status'), 'utf-8')
+        .trim();
       expect(status).toBe('completed');
 
-      const meta = JSON.parse(fs.readFileSync(path.join(taskDir, 'meta.json'), 'utf-8'));
+      const meta = JSON.parse(
+        fs.readFileSync(path.join(taskDir, 'meta.json'), 'utf-8'),
+      );
       expect(meta.command).toBe('echo hello');
       expect(meta.exit_code).toBe(0);
       expect(meta.pid).toBeGreaterThan(0);
@@ -50,6 +54,34 @@ describe('HostExecutor', () => {
 
       const stdout = fs.readFileSync(path.join(taskDir, 'stdout.log'), 'utf-8');
       expect(stdout.trim()).toBe('hello');
+    });
+  });
+
+  describe('kill', () => {
+    it('terminates a running process and updates status', async () => {
+      const taskId = 'test-kill-001';
+      executor.run({
+        taskId,
+        groupFolder: 'main',
+        command: 'sleep 60',
+        workingDir: tmpDir,
+        background: true,
+      });
+      await new Promise((r) => setTimeout(r, 300));
+
+      const killed = executor.kill(taskId, 'main');
+      expect(killed).toBe(true);
+
+      await new Promise((r) => setTimeout(r, 500));
+      const taskDir = path.join(tmpDir, 'main', taskId);
+      const status = fs
+        .readFileSync(path.join(taskDir, 'status'), 'utf-8')
+        .trim();
+      expect(status).toBe('killed');
+    });
+
+    it('returns false for non-existent task', () => {
+      expect(executor.kill('no-such-task', 'main')).toBe(false);
     });
   });
 });
