@@ -4,6 +4,7 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
+  DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
@@ -48,6 +49,7 @@ import { initMemorySchema } from './memory-db.js';
 import { seedMemoryEntries } from './memory-seed.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
+import { HostExecutor } from './host-executor.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
@@ -565,7 +567,11 @@ async function main(): Promise<void> {
       if (text) await channel.sendMessage(jid, text);
     },
   });
+  const hostExecutor = new HostExecutor(path.join(DATA_DIR, 'host-tasks'));
+  hostExecutor.recover();
+
   startIpcWatcher({
+    hostExecutor,
     sendMessage: (jid, text) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
