@@ -84,4 +84,32 @@ describe('HostExecutor', () => {
       expect(executor.kill('no-such-task', 'main')).toBe(false);
     });
   });
+
+  describe('run (failure)', () => {
+    it('captures stderr and writes failed status', async () => {
+      const taskId = 'test-fail-001';
+      executor.run({
+        taskId,
+        groupFolder: 'main',
+        command: 'echo err >&2 && exit 1',
+        workingDir: tmpDir,
+        background: true,
+      });
+      await new Promise((r) => setTimeout(r, 1000));
+
+      const taskDir = path.join(tmpDir, 'main', taskId);
+      const status = fs
+        .readFileSync(path.join(taskDir, 'status'), 'utf-8')
+        .trim();
+      expect(status).toBe('failed');
+
+      const meta = JSON.parse(
+        fs.readFileSync(path.join(taskDir, 'meta.json'), 'utf-8'),
+      );
+      expect(meta.exit_code).toBe(1);
+
+      const stderr = fs.readFileSync(path.join(taskDir, 'stderr.log'), 'utf-8');
+      expect(stderr.trim()).toBe('err');
+    });
+  });
 });
