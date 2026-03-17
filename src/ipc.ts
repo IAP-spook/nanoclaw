@@ -7,6 +7,7 @@ import { DATA_DIR, GROUPS_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
+import { HostExecutor } from './host-executor.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
@@ -28,6 +29,7 @@ export interface IpcDeps {
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
+  hostExecutor?: HostExecutor;
 }
 
 let ipcWatcherRunning = false;
@@ -149,6 +151,47 @@ export function startIpcWatcher(deps: IpcDeps): void {
         }
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
+      }
+
+      // Process host-exec requests
+      if (deps.hostExecutor) {
+        const hostExecDir = path.join(ipcBaseDir, sourceGroup, 'host-exec');
+        try {
+          if (fs.existsSync(hostExecDir)) {
+            const hostExecFiles = fs
+              .readdirSync(hostExecDir)
+              .filter((f) => f.endsWith('.json'));
+            for (const file of hostExecFiles) {
+              const filePath = path.join(hostExecDir, file);
+              try {
+                const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+                processHostExecIpc(
+                  data,
+                  sourceGroup,
+                  isMain,
+                  deps.hostExecutor,
+                );
+                fs.unlinkSync(filePath);
+              } catch (err) {
+                logger.error(
+                  { file, sourceGroup, err },
+                  'Error processing IPC host-exec',
+                );
+                const errorDir = path.join(ipcBaseDir, 'errors');
+                fs.mkdirSync(errorDir, { recursive: true });
+                fs.renameSync(
+                  filePath,
+                  path.join(errorDir, `${sourceGroup}-${file}`),
+                );
+              }
+            }
+          }
+        } catch (err) {
+          logger.error(
+            { err, sourceGroup },
+            'Error reading IPC host-exec directory',
+          );
+        }
       }
     }
 
@@ -540,5 +583,59 @@ export async function processTaskIpc(
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
+  }
+}
+
+export function processHostExecIpc(
+  data: {
+    type: string;
+    task_id?: string;
+    groupFolder?: string;
+    command?: string;
+    working_dir?: string;
+    background?: boolean;
+    timestamp?: number;
+  },
+  sourceGroup: string,
+  isMain: boolean,
+  executor: HostExecutor,
+): void {
+  switch (data.type) {
+    case 'host_exec':
+      if (data.task_id && data.command) {
+        executor.run({
+          taskId: data.task_id,
+          groupFolder: sourceGroup,
+          command: data.command,
+          workingDir: data.working_dir || process.cwd(),
+          background: data.background ?? true,
+        });
+        logger.info(
+          { taskId: data.task_id, sourceGroup },
+          'Host exec started via IPC',
+        );
+      }
+      break;
+
+    case 'host_kill':
+      if (data.task_id) {
+        const taskGroup = data.groupFolder || sourceGroup;
+        if (!isMain && taskGroup !== sourceGroup) {
+          logger.warn(
+            { taskId: data.task_id, sourceGroup, taskGroup },
+            'Unauthorized host_kill blocked',
+          );
+          break;
+        }
+        executor.kill(data.task_id, taskGroup);
+        logger.info(
+          { taskId: data.task_id, sourceGroup },
+          'Host kill requested via IPC',
+        );
+      }
+      break;
+
+    default:
+      logger.warn({ type: data.type }, 'Unknown host-exec IPC type');
   }
 }
