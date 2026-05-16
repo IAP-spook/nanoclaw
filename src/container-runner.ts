@@ -111,6 +111,25 @@ function buildVolumeMounts(
         readonly: true,
       });
     }
+
+    // Share main group's memory and preferences into non-main containers
+    // as read-only so they can recall context but never alter it.
+    const mainMemDir = path.join(GROUPS_DIR, 'main', 'memory');
+    if (fs.existsSync(mainMemDir)) {
+      mounts.push({
+        hostPath: mainMemDir,
+        containerPath: '/workspace/group/memory',
+        readonly: true,
+      });
+    }
+    const mainPrefs = path.join(GROUPS_DIR, 'main', 'preferences.md');
+    if (fs.existsSync(mainPrefs)) {
+      mounts.push({
+        hostPath: mainPrefs,
+        containerPath: '/workspace/group/preferences.md',
+        readonly: true,
+      });
+    }
   }
 
   // Per-group Claude sessions directory (isolated from other groups)

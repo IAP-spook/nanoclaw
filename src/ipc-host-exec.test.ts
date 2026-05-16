@@ -3,7 +3,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { processHostExecIpc } from './ipc.js';
 
 describe('IPC host-exec handling', () => {
-  let mockExecutor: { run: ReturnType<typeof vi.fn>; kill: ReturnType<typeof vi.fn> };
+  let mockExecutor: {
+    run: ReturnType<typeof vi.fn>;
+    kill: ReturnType<typeof vi.fn>;
+  };
 
   beforeEach(() => {
     mockExecutor = {

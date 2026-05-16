@@ -4,6 +4,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import { registerChannel, type ChannelOpts } from './registry.js';
 import type { Channel, NewMessage } from '../types.js';
 import { logger as rootLogger } from '../logger.js';
+import { ASSISTANT_NAME } from '../config.js';
 
 const logger = rootLogger.child({ channel: 'feishu' });
 
@@ -26,12 +27,20 @@ export function feishuFileType(ext: string): string {
   return FILE_TYPE_MAP[ext.toLowerCase()] || 'stream';
 }
 
+// Watchdog: if no event received within this interval, force reconnect.
+// SDK ping is every 120s, so 10 minutes of silence strongly indicates a dead connection.
+const WATCHDOG_INTERVAL = 5 * 60 * 1000; // check every 5 min
+const WATCHDOG_TIMEOUT = 10 * 60 * 1000; // 10 min without events → reconnect
+
 class FeishuChannel implements Channel {
   name = 'feishu';
   private wsClient: lark.WSClient | null = null;
   private dispatcher: lark.EventDispatcher | null = null;
   private connected = false;
   private userNameCache = new Map<string, string>();
+  private botOpenId: string | null = null;
+  private lastEventTime = Date.now();
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private opts: ChannelOpts,
@@ -45,6 +54,7 @@ class FeishuChannel implements Channel {
     this.dispatcher = new lark.EventDispatcher({});
     this.dispatcher.register({
       'im.message.receive_v1': async (data) => {
+        this.lastEventTime = Date.now();
         logger.info(
           { eventType: 'im.message.receive_v1' },
           'Event received from Feishu',
@@ -64,9 +74,27 @@ class FeishuChannel implements Channel {
       autoReconnect: true,
     });
 
+    // Fetch the bot's own open_id so we can identify @bot mentions
+    try {
+      const botInfo = await this.client.request({
+        method: 'GET',
+        url: 'https://open.feishu.cn/open-apis/bot/v3/info/',
+      });
+      this.botOpenId =
+        botInfo.bot?.open_id ?? botInfo.data?.bot?.open_id ?? null;
+      logger.info({ botOpenId: this.botOpenId }, 'Bot identity resolved');
+    } catch (err) {
+      logger.warn(
+        { err },
+        'Failed to resolve bot open_id, @mention filtering disabled',
+      );
+    }
+
     logger.info('Connecting via WebSocket long connection');
     await this.wsClient.start({ eventDispatcher: this.dispatcher });
     this.connected = true;
+    this.lastEventTime = Date.now();
+    this.startWatchdog();
     logger.info('Connected');
   }
 
@@ -215,7 +243,45 @@ class FeishuChannel implements Channel {
     return jid.endsWith(JID_SUFFIX);
   }
 
+  private startWatchdog(): void {
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+    this.watchdogTimer = setInterval(() => {
+      const silentMs = Date.now() - this.lastEventTime;
+      if (silentMs > WATCHDOG_TIMEOUT) {
+        logger.warn(
+          { silentMinutes: Math.round(silentMs / 60000) },
+          'Watchdog: no events received, forcing reconnect',
+        );
+        this.forceReconnect().catch((err) =>
+          logger.error({ err }, 'Watchdog reconnect failed'),
+        );
+      }
+    }, WATCHDOG_INTERVAL);
+  }
+
+  private async forceReconnect(): Promise<void> {
+    if (!this.wsConfig) return;
+    try {
+      this.wsClient?.close({});
+    } catch {
+      /* ignore close errors */
+    }
+
+    this.wsClient = new lark.WSClient({
+      appId: this.wsConfig.appId,
+      appSecret: this.wsConfig.appSecret,
+      loggerLevel: lark.LoggerLevel.warn,
+      autoReconnect: true,
+    });
+
+    await this.wsClient.start({ eventDispatcher: this.dispatcher! });
+    this.lastEventTime = Date.now();
+    this.connected = true;
+    logger.info('Watchdog: reconnected successfully');
+  }
+
   async disconnect(): Promise<void> {
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
     this.wsClient?.close({});
     this.connected = false;
     logger.info('Disconnected');
@@ -225,9 +291,20 @@ class FeishuChannel implements Channel {
     const sender = data.sender;
     const message = data.message;
 
-    if (sender?.sender_type !== 'user') return;
+    const senderType = sender?.sender_type;
+    // Accept messages from users and other bots (apps), but skip unknown types.
+    if (senderType !== 'user' && senderType !== 'app') return;
 
     const senderOpenId = sender?.sender_id?.open_id ?? 'unknown';
+
+    // Skip messages from our own bot to avoid self-triggering loops
+    const isFromSelf =
+      senderType === 'app' &&
+      this.botOpenId !== null &&
+      senderOpenId === this.botOpenId;
+    if (isFromSelf) return;
+
+    const isFromBot = senderType === 'app';
     const chatId = message?.chat_id;
     const chatType = message?.chat_type;
     const messageType = message?.message_type;
@@ -250,13 +327,33 @@ class FeishuChannel implements Channel {
       content = `[${messageType ?? 'unknown'} message]`;
     }
 
+    // In Feishu group chats, check the mentions array to determine if this
+    // message @mentions our bot. Only then prepend @ASSISTANT_NAME for
+    // trigger matching. Other @mentions (users, other bots) are stripped.
+    const mentions: Array<{ key: string; id?: { open_id?: string } }> =
+      message.mentions ?? [];
+    const botMentionKeys = new Set(
+      mentions
+        .filter((m) => this.botOpenId && m.id?.open_id === this.botOpenId)
+        .map((m) => m.key),
+    );
+    // If we couldn't resolve botOpenId, fall back to treating any mention
+    // in a group message as a bot mention (best-effort).
+    const hasBotMention =
+      isGroup &&
+      (botMentionKeys.size > 0 ||
+        (!this.botOpenId && /@_user_\d+/.test(content)));
     content = content.replace(/@_user_\d+/g, '').trim();
+    if (hasBotMention) {
+      content = `@${ASSISTANT_NAME} ${content}`;
+    }
 
-    const senderName = await this.resolveSenderName(senderOpenId);
+    // Contact API cannot resolve bot open_ids, so skip the lookup for bots
+    const senderName = isFromBot
+      ? senderOpenId
+      : await this.resolveSenderName(senderOpenId);
 
-    const timestamp = new Date(
-      parseInt(message.create_time, 10) * 1000,
-    ).toISOString();
+    const timestamp = new Date(parseInt(message.create_time, 10)).toISOString();
 
     this.opts.onChatMetadata(jid, timestamp, undefined, 'feishu', isGroup);
 
@@ -268,6 +365,9 @@ class FeishuChannel implements Channel {
       content,
       timestamp,
       is_from_me: false,
+      // is_bot_message is only for filtering out our OWN bot's output.
+      // Other bots' messages are treated as regular messages so they can
+      // trigger @mentions and appear in agent context.
       is_bot_message: false,
     };
 

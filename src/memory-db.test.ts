@@ -24,9 +24,9 @@ afterEach(() => {
 
 describe('initMemorySchema', () => {
   it('creates memory_entries table with correct columns', () => {
-    const columns = db
-      .prepare("PRAGMA table_info('memory_entries')")
-      .all() as { name: string }[];
+    const columns = db.prepare("PRAGMA table_info('memory_entries')").all() as {
+      name: string;
+    }[];
     const names = columns.map((c) => c.name);
     expect(names).toContain('id');
     expect(names).toContain('group_folder');
@@ -338,9 +338,7 @@ describe('memoryDelete', () => {
     const deleted = memoryDelete(db, { id, groupFolder: 'main' });
     expect(deleted).toBe(true);
 
-    const row = db
-      .prepare('SELECT * FROM memory_entries WHERE id = ?')
-      .get(id);
+    const row = db.prepare('SELECT * FROM memory_entries WHERE id = ?').get(id);
     expect(row).toBeUndefined();
   });
 
@@ -361,9 +359,7 @@ describe('memoryDelete', () => {
     expect(deleted).toBe(false);
 
     // Entry still exists
-    const row = db
-      .prepare('SELECT * FROM memory_entries WHERE id = ?')
-      .get(id);
+    const row = db.prepare('SELECT * FROM memory_entries WHERE id = ?').get(id);
     expect(row).toBeDefined();
   });
 
@@ -403,9 +399,7 @@ describe('memoryDelete', () => {
 
     // FTS should no longer find it
     const ftsResults = db
-      .prepare(
-        "SELECT * FROM memory_fts WHERE memory_fts MATCH 'xyzzy'",
-      )
+      .prepare("SELECT * FROM memory_fts WHERE memory_fts MATCH 'xyzzy'")
       .all();
     expect(ftsResults.length).toBe(0);
   });

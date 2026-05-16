@@ -50,11 +50,18 @@ export class HostExecutor {
       pid: child.pid!,
       started_at: new Date().toISOString(),
     };
-    fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
+    fs.writeFileSync(
+      path.join(dir, 'meta.json'),
+      JSON.stringify(meta, null, 2),
+    );
 
     // Pipe stdout/stderr to log files
-    const stdoutStream = fs.createWriteStream(path.join(dir, 'stdout.log'), { flags: 'a' });
-    const stderrStream = fs.createWriteStream(path.join(dir, 'stderr.log'), { flags: 'a' });
+    const stdoutStream = fs.createWriteStream(path.join(dir, 'stdout.log'), {
+      flags: 'a',
+    });
+    const stderrStream = fs.createWriteStream(path.join(dir, 'stderr.log'), {
+      flags: 'a',
+    });
 
     child.stdout?.pipe(stdoutStream);
     child.stderr?.pipe(stderrStream);
@@ -66,12 +73,17 @@ export class HostExecutor {
       this.processes.delete(key);
 
       // Check if this was killed
-      const currentStatus = fs.readFileSync(path.join(dir, 'status'), 'utf-8').trim();
+      const currentStatus = fs
+        .readFileSync(path.join(dir, 'status'), 'utf-8')
+        .trim();
       if (currentStatus === 'killed') {
         // Already marked as killed, just update meta
         meta.finished_at = new Date().toISOString();
         meta.exit_code = code;
-        fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
+        fs.writeFileSync(
+          path.join(dir, 'meta.json'),
+          JSON.stringify(meta, null, 2),
+        );
         return;
       }
 
@@ -80,7 +92,10 @@ export class HostExecutor {
 
       meta.finished_at = new Date().toISOString();
       meta.exit_code = code;
-      fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
+      fs.writeFileSync(
+        path.join(dir, 'meta.json'),
+        JSON.stringify(meta, null, 2),
+      );
 
       logger.debug({ taskId, groupFolder, code }, 'host task finished');
     });
@@ -89,7 +104,10 @@ export class HostExecutor {
       this.processes.delete(key);
       fs.writeFileSync(path.join(dir, 'status'), 'failed');
       meta.finished_at = new Date().toISOString();
-      fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
+      fs.writeFileSync(
+        path.join(dir, 'meta.json'),
+        JSON.stringify(meta, null, 2),
+      );
       logger.error({ taskId, err }, 'host task error');
     });
   }
@@ -119,13 +137,15 @@ export class HostExecutor {
   recover(): void {
     if (!fs.existsSync(this.baseDir)) return;
 
-    const groups = fs.readdirSync(this.baseDir, { withFileTypes: true })
+    const groups = fs
+      .readdirSync(this.baseDir, { withFileTypes: true })
       .filter((d) => d.isDirectory())
       .map((d) => d.name);
 
     for (const group of groups) {
       const groupDir = path.join(this.baseDir, group);
-      const tasks = fs.readdirSync(groupDir, { withFileTypes: true })
+      const tasks = fs
+        .readdirSync(groupDir, { withFileTypes: true })
         .filter((d) => d.isDirectory())
         .map((d) => d.name);
 
@@ -154,7 +174,10 @@ export class HostExecutor {
           fs.writeFileSync(statusFile, 'failed');
           meta.finished_at = new Date().toISOString();
           fs.writeFileSync(metaFile, JSON.stringify(meta, null, 2));
-          logger.info({ taskId, group, pid: meta.pid }, 'recovered dead host task');
+          logger.info(
+            { taskId, group, pid: meta.pid },
+            'recovered dead host task',
+          );
         }
       }
     }

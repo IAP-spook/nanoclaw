@@ -29,7 +29,10 @@ describe('extractExplicitMemories', () => {
 
   it('extracts English "remember" pattern', () => {
     const messages = [
-      { role: 'user' as const, content: 'Remember: always use cosine annealing for LR' },
+      {
+        role: 'user' as const,
+        content: 'Remember: always use cosine annealing for LR',
+      },
     ];
     const result = extractExplicitMemories(messages);
     expect(result.length).toBe(1);
@@ -44,9 +47,7 @@ describe('extractExplicitMemories', () => {
   });
 
   it('returns empty for no matches', () => {
-    const messages = [
-      { role: 'user' as const, content: '今天天气怎么样？' },
-    ];
+    const messages = [{ role: 'user' as const, content: '今天天气怎么样？' }];
     expect(extractExplicitMemories(messages).length).toBe(0);
   });
 
@@ -150,7 +151,13 @@ describe('autoExtractAndSave (integration)', () => {
       { role: 'assistant' as const, content: 'Hello!' },
     ];
 
-    const count = await autoExtractAndSave(baseUrl, 'main', messages, null, () => {});
+    const count = await autoExtractAndSave(
+      baseUrl,
+      'main',
+      messages,
+      null,
+      () => {},
+    );
     expect(count).toBe(0);
   });
 });
